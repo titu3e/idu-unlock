@@ -263,7 +263,7 @@ else
   OWRT_KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/jidu-kh.XXXXXX")" || die "cannot create a temp file"
   FINAL_KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/jidu-final-kh.XXXXXX")" || die "cannot create a temp file"
   SSH_ERR="$(mktemp "${TMPDIR:-/tmp}/jidu-err.XXXXXX")" || die "cannot create a temp file"
-  trap 'rm -f "$STOCK_KNOWN_HOSTS" "$OWRT_KNOWN_HOSTS" "$FINAL_KNOWN_HOSTS" "$SSH_ERR"' EXIT
+  trap 'rm -f "$STOCK_KNOWN_HOSTS" "$OWRT_KNOWN_HOSTS" "$FINAL_KNOWN_HOSTS" "$SSH_ERR" "${EXPECT_WRAPPER:-}"' EXIT
 fi
 
 SSH=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STOCK_KNOWN_HOSTS" \
@@ -283,6 +283,32 @@ SCP_NEW=(scp -O -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OWRT
              -o LogLevel=ERROR)
 SSH_FINAL=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FINAL_KNOWN_HOSTS" \
                -o LogLevel=ERROR -o ConnectTimeout=5 "root@$OPENWRT")
+
+# If the parent flash.sh verified a password-protected stock SSH session,
+# reuse that session-only credential for all stock SSH/SCP commands here too.
+# The expect helper contains no credential; the password remains in the
+# inherited environment and is discarded when this process exits.
+EXPECT_WRAPPER=""
+if [ -n "${IDU_SSH_PASSWORD:-}" ] && [ "$DRY_RUN" = 0 ]; then
+  command -v expect >/dev/null 2>&1 || die "'expect' is required for password-authenticated SSH (sudo apt install expect)"
+  EXPECT_WRAPPER="$(mktemp "${TMPDIR:-/tmp}/idu-ssh-auth.XXXXXX")" || die "cannot create SSH helper"
+  cat > "$EXPECT_WRAPPER" <<'EXPECT'
+#!/usr/bin/expect -f
+set timeout 900
+set command $argv
+spawn {*}$command
+expect {
+    -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\\r"; exp_continue }
+    -re "(?i)\\(yes/no\\)" { send -- "yes\\r"; exp_continue }
+    eof
+}
+catch wait result
+exit [lindex $result 3]
+EXPECT
+  chmod 700 "$EXPECT_WRAPPER"
+  SSH=(expect "$EXPECT_WRAPPER" "${SSH[@]}")
+  SCP=(expect "$EXPECT_WRAPPER" "${SCP[@]}")
+fi
 
 # The MFG partition is factory data that survives both firmware stages and is
 # unique to the physical unit. Hash it instead of trusting the reused
