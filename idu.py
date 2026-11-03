@@ -567,74 +567,106 @@ exit [lindex $r 3]
                           text=True, timeout=timeout + 60, env=env)
 
 
-class Shell:
-    """ssh/scp to the router, authenticating by key or by password."""
+def _known_hosts_path() -> str:
+    """Use the invoking user's known_hosts even when the wrapper runs under sudo."""
+    home = os.path.expanduser("~")
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and os.name == "posix":
+        try:
+            import pwd
+            home = pwd.getpwnam(sudo_user).pw_dir
+        except (ImportError, KeyError):
+            pass
+    return os.path.join(home, ".ssh", "known_hosts")
 
-    def __init__(self, host: str, key: str | None = None, password: str | None = None,
-                 user: str = "root"):
-        if key is None and password is None:
-            raise ValueError("Shell needs a key or a password")
+
+class Shell:
+    """SSH/SCP transport with verified host keys and interactive password auth."""
+
+    def __init__(self, host: str, key: str | None = None,
+                 password: str | None = None, user: str = "root"):
         require_tool("ssh")
         self.host, self.key, self.password = host, key, password
         self.user = user
+        self.known_hosts = _known_hosts_path()
 
-    # -- option building --------------------------------------------------- #
     def _opts(self) -> list:
-        opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        opts = ["-o", "StrictHostKeyChecking=accept-new",
+                "-o", f"UserKnownHostsFile={self.known_hosts}",
                 "-o", "ConnectTimeout=10"]
-        if self.password is None:
-            opts += ["-i", self.key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"]
-        else:
-            opts += ["-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1",
+        if self.key:
+            opts += ["-i", self.key, "-o", "IdentitiesOnly=yes",
+                     "-o", "BatchMode=yes"]
+        elif self.password is not None:
+            opts += ["-o", "PubkeyAuthentication=no",
+                     "-o", "NumberOfPasswordPrompts=1",
                      "-o", "PreferredAuthentications=password"]
+        else:
+            # Leave password entry to OpenSSH on the user's terminal. This
+            # works with sudo and also supports routers with non-empty root
+            # passwords without storing credentials in this program.
+            opts += ["-o", "PreferredAuthentications=publickey,password,keyboard-interactive"]
         return opts
 
-    def _exec(self, argv: list, timeout: int) -> subprocess.CompletedProcess:
-        if self.password is None:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return _expect(argv, self.password, timeout)
+    def _run(self, argv: list, timeout: int, stdout=subprocess.PIPE):
+        def invoke():
+            if self.password is None:
+                return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE,
+                                      text=(stdout == subprocess.PIPE),
+                                      timeout=timeout)
+            result = _expect(argv, self.password, timeout)
+            if stdout != subprocess.PIPE:
+                stdout.write(result.stdout.encode())
+                result.stdout = ""
+            return result
 
-    # -- operations -------------------------------------------------------- #
+        result = invoke()
+        diagnostic = (result.stderr or "")
+        if isinstance(result.stdout, str):
+            diagnostic += result.stdout
+        if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
+                or "Host key verification failed" in diagnostic):
+            print(diagnostic.strip(), file=sys.stderr)
+            answer = input(
+                f"The SSH host key for {self.host} changed. Remove the old "
+                "saved key and trust the key now presented? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                raise IduError("SSH host key was not changed; connection aborted.")
+            require_tool("ssh-keygen")
+            os.makedirs(os.path.dirname(self.known_hosts), exist_ok=True)
+            removed = subprocess.run(
+                ["ssh-keygen", "-R", self.host, "-f", self.known_hosts],
+                capture_output=True, text=True)
+            if removed.returncode != 0:
+                raise IduError(f"could not update known_hosts: {removed.stderr.strip()}")
+            print("[*] Old SSH host key removed; reconnecting and recording the new key.")
+            result = invoke()
+        return result
+
     def run(self, command: str, timeout: int = 300, check: bool = True) -> str:
         argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", command]
-        result = self._exec(argv, timeout)
+        result = self._run(argv, timeout)
         if check and result.returncode != 0:
-            raise IduError(f"remote command failed: {command}\n"
-                            f"    {result.stderr.strip()[:200]}")
-        return result.stdout
+            detail = (result.stderr or "").strip()
+            if isinstance(result.stdout, str) and result.stdout.strip():
+                detail = (detail + "\\n" + result.stdout.strip()).strip()
+            raise IduError(f"remote command failed: {command}\\n    {detail[:400] or 'SSH exited without diagnostic output'}")
+        return result.stdout or ""
 
     def send(self, local: str, remote: str, timeout: int = 900) -> None:
-        # -O forces the legacy scp protocol, which dropbear speaks.
         require_tool("scp")
         argv = ["scp", "-O"] + self._opts() + [local, f"{self.user}@{self.host}:{remote}"]
-        result = self._exec(argv, timeout)
+        result = self._run(argv, timeout)
         if result.returncode != 0:
-            raise IduError(f"scp failed: {result.stderr.strip()[:200]}")
+            raise IduError(f"scp failed: {(result.stderr or '').strip()[:400]}")
 
     def fetch(self, remote: str, local: str, timeout: int = 900) -> None:
+        argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", f"cat {shlex.quote(remote)}"]
         with open(local, "wb") as handle:
-            argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", f"cat {remote}"]
-            proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.PIPE)
-            _, err = proc.communicate(timeout=timeout)
-            if proc.returncode != 0:
-                raise IduError(f"read {remote} failed: {err.decode().strip()[:200]}")
-
-    def alive(self, timeout: int = 12) -> bool:
-        try:
-            result = self._exec(["ssh"] + self._opts()
-                                + [f"{self.user}@{self.host}", "true"], timeout)
-            return result.returncode == 0
-        except Exception:  # noqa: BLE001
-            return False
-
-    def wait(self, seconds: int, what: str, interval: int = 5) -> None:
-        print(f"[*] waiting up to {seconds}s for {what} ...", flush=True)
-        for _ in range(max(1, seconds // interval)):
-            if self.alive():
-                print(f"[+] {what} is reachable")
-                return
-            time.sleep(interval)
-        raise IduError(f"timed out waiting for {what}")
+            result = self._run(argv, timeout, stdout=handle)
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip()
+            raise IduError(f"read {remote} failed: {detail[:400] or 'SSH exited without diagnostic output'}")
 
 
 # --------------------------------------------------------------------------- #
@@ -909,7 +941,7 @@ def _shell_for(key: str | None, host: str) -> Shell:
         if not os.path.exists(key):
             raise IduError(f"no SSH key at {key} — create one, or drop --key")
         return Shell(host, key=key)
-    return Shell(host, password="")
+    return Shell(host)
 
 
 def _ssh_hint(key: str | None, host: str) -> str:
