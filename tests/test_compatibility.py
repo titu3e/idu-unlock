@@ -172,6 +172,10 @@ class CompatibilityTests(unittest.TestCase):
         # the oldest stock rootfs confirmed to carry the vulnerable hash
         self.assert_state("JIO_JIDU6701_R2.0.19.6", "YES", model="JIDU6701")
 
+    def test_r3_1_0_is_confirmed_by_the_documented_range(self):
+        # R3.1.0 is inside the MTK R2.0.19.6-R3.2.0 confirmed window
+        self.assert_state("ARCNJIO_JIDU6101_R3.1.0", "YES")
+
     def test_r3_2_0_is_confirmed(self):
         # a member-confirmed working build on the MTK family
         self.assert_state("ARCNJIO_JIDU6101_R3.2.0", "YES")
@@ -351,6 +355,8 @@ class UnlockFailureDiagnosticsTests(unittest.TestCase):
 
         self.assertIn("history probe rejected: ERR_INVALID_PASSWORD", output.getvalue())
         self.assertIn("all unlock attempts failed", str(caught.exception))
+        self.assertIn("history probe rejected: ERR_INVALID_PASSWORD",
+                      str(caught.exception))
         self.assertNotIn("firewall is blocking", str(caught.exception))
 
 
