@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import dataclasses
 import errno
+import getpass
 import http.server
 import ipaddress
 import json
@@ -581,14 +582,19 @@ def _known_hosts_path() -> str:
 
 
 class Shell:
-    """SSH/SCP transport with verified host keys and interactive password auth."""
+    """SSH/SCP transport with verified host keys and session-only password reuse."""
 
     def __init__(self, host: str, key: str | None = None,
                  password: str | None = None, user: str = "root"):
         require_tool("ssh")
-        self.host, self.key, self.password = host, key, password
+        self.host, self.key = host, key
+        # A launcher may pass a session password to child processes through the
+        # environment. It is never written to disk.
+        self.password = (password if password is not None
+                         else os.environ.get("IDU_SSH_PASSWORD"))
         self.user = user
         self.known_hosts = _known_hosts_path()
+        self._auth_checked = bool(key or self.password is not None)
 
     def _opts(self) -> list:
         opts = ["-o", "StrictHostKeyChecking=accept-new",
@@ -601,14 +607,64 @@ class Shell:
             opts += ["-o", "PubkeyAuthentication=no",
                      "-o", "NumberOfPasswordPrompts=1",
                      "-o", "PreferredAuthentications=password"]
+        elif self._auth_checked:
+            opts += ["-o", "BatchMode=yes"]
         else:
-            # Leave password entry to OpenSSH on the user's terminal. This
-            # works with sudo and also supports routers with non-empty root
-            # passwords without storing credentials in this program.
             opts += ["-o", "PreferredAuthentications=publickey,password,keyboard-interactive"]
         return opts
 
+    def _ensure_authenticated(self, timeout: int = 12) -> None:
+        """Try non-interactive SSH first, then prompt once and cache in memory."""
+        if self._auth_checked:
+            return
+        if self.key:
+            self._auth_checked = True
+            return
+
+        probe = ["ssh", "-o", "BatchMode=yes"] + [
+            option for option in self._opts()
+            if option not in ("-o", "PreferredAuthentications=publickey,password,keyboard-interactive")
+        ] + [f"{self.user}@{self.host}", "true"]
+        # Keep host-key handling and known_hosts settings, but do not let this
+        # probe ask for a password. A successful probe means all later commands
+        # can remain non-interactive.
+        result = subprocess.run(probe, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                timeout=timeout)
+        diagnostic = (result.stderr or "") + (result.stdout or "")
+        if result.returncode == 0:
+            self._auth_checked = True
+            return
+
+        if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
+                or "Host key verification failed" in diagnostic):
+            # Reuse the normal, explicit host-key-change confirmation path.
+            self._run(probe, timeout)
+            return
+
+        require_tool("expect")
+        for attempt in range(3):
+            self.password = getpass.getpass(
+                f"Root SSH password for {self.user}@{self.host}: ")
+            test = ["ssh"] + self._opts() + [
+                f"{self.user}@{self.host}", "true"]
+            checked = _expect(test, self.password, timeout)
+            if checked.returncode == 0:
+                self._auth_checked = True
+                print("[+] Root SSH authentication verified; password cached for this run.")
+                return
+            detail = checked.stderr or checked.stdout or ""
+            detail = detail.strip()
+            self.password = None
+            if attempt < 2:
+                print("[-] SSH authentication failed; try again.", file=sys.stderr)
+        raise IduError(
+            "root SSH authentication failed after 3 attempts."
+            + (f"\n    {detail[:300]}" if detail else ""))
+
     def _run(self, argv: list, timeout: int, stdout=subprocess.PIPE):
+        self._ensure_authenticated(timeout)
+
         def invoke():
             if self.password is None:
                 return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE,
@@ -664,6 +720,8 @@ class Shell:
             argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", "true"]
             result = self._run(argv, timeout)
             return result.returncode == 0
+        except IduError:
+            raise
         except Exception:  # noqa: BLE001
             return False
 
@@ -672,7 +730,10 @@ class Shell:
         argv = ["scp", "-O"] + self._opts() + [local, f"{self.user}@{self.host}:{remote}"]
         result = self._run(argv, timeout)
         if result.returncode != 0:
-            raise IduError(f"scp failed: {(result.stderr or '').strip()[:400]}")
+            detail = result.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            raise IduError(f"scp failed: {detail.strip()[:400]}")
 
     def fetch(self, remote: str, local: str, timeout: int = 900) -> None:
         argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", f"cat {shlex.quote(remote)}"]
