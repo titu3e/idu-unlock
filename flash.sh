@@ -241,7 +241,7 @@ prepare_root_ssh_auth() {
     return 1
   }
   pub="$(cat "$KEY.pub")"
-  remote_cmd="$("$PY" -c 'import shlex,sys; k=sys.argv[1]; print("umask 077; mkdir -p /root/.ssh /etc/dropbear; touch /root/.ssh/authorized_keys /etc/dropbear/authorized_keys; grep -qxF " + shlex.quote(k) + " /root/.ssh/authorized_keys || printf %s\\\\n " + shlex.quote(k) + " >> /root/.ssh/authorized_keys; grep -qxF " + shlex.quote(k) + " /etc/dropbear/authorized_keys || printf %s\\\\n " + shlex.quote(k) + " >> /etc/dropbear/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys")' "$pub")" || return 1
+  remote_cmd="$("$PY" -c 'import shlex,sys; k=sys.argv[1]; print("umask 077; mkdir -p /root/.ssh /etc/dropbear; chown root:root /etc/dropbear && chmod go-w /etc/dropbear; touch /root/.ssh/authorized_keys /etc/dropbear/authorized_keys; grep -qxF " + shlex.quote(k) + " /root/.ssh/authorized_keys || printf %s\\\\n " + shlex.quote(k) + " >> /root/.ssh/authorized_keys; grep -qxF " + shlex.quote(k) + " /etc/dropbear/authorized_keys || printf %s\\\\n " + shlex.quote(k) + " >> /etc/dropbear/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys")' "$pub")" || return 1
 
   for attempt in 1 2 3; do
     printf 'Root SSH password for root@%s (used only to install your key): ' "$host"
