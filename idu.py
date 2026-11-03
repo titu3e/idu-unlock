@@ -1438,17 +1438,32 @@ def backup(shell: Shell, outdir: str, include_full_chip: bool = False) -> str:
         print("[!] MFG layout: positional table, not KEY=VALUE — "
               f"named what could be identified, kept {len(slots)} slot(s) as-is")
 
-    print(f"[*] Backing up {len(parts)} partitions...")
+    # Count only partitions that will actually be written. Progress is
+    # partition-based (not a byte estimate), so the percentage is honest even
+    # when a partition takes much longer than another.
+    selected = [p for p in parts
+                if include_full_chip or p.device != "mtd0"]
+    total = len(selected)
+    completed = 0
+    print(f"[*] Backup: 0/{total} partitions (0%)", flush=True)
     for part in parts:
         if part.device == "mtd0" and not include_full_chip:
             print(f"    {part.name} skipped (pass --full-chip to include)")
             continue
         target = os.path.join(images, part.filename)
-        print(f"    {part.name:<14} {human_size(part.size)}")
-        if part.device == mfg.device:
-            os.replace(staged, target)          # already fetched, just file it
-            continue
-        shell.fetch(f"/dev/{part.device}", target)
+        print(f"[*] Reading {part.name} ({human_size(part.size)})", flush=True)
+        try:
+            if part.device == mfg.device:
+                os.replace(staged, target)      # already fetched, just file it
+            else:
+                shell.fetch(f"/dev/{part.device}", target)
+        except Exception as problem:
+            print(f"[-] {part.name}: failed", flush=True)
+            raise IduError(f"partition backup failed for {part.name}: {problem}") from problem
+        completed += 1
+        percent = int(completed * 100 / total) if total else 100
+        print(f"[+] {part.name}: complete — {completed}/{total} ({percent}%)",
+              flush=True)
     print(f"[+] Backup saved: {root}")
     return root
 
