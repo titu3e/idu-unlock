@@ -300,7 +300,7 @@ if { [ "${IDU_SSH_PASSWORD_SET:-0}" = 1 ] || [ -n "${IDU_SSH_PASSWORD:-}" ]; } &
 #!/usr/bin/expect -f
 set timeout 900
 set command $argv
-spawn {*}$command
+spawn -noecho {*}$command
 expect {
     -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
     -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
