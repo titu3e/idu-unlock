@@ -19,6 +19,55 @@ class FakeApi:
         raise AssertionError(f"unexpected API call: {method}")
 
 
+class SessionSshAuthenticationTests(unittest.TestCase):
+    def _shell(self):
+        with mock.patch.object(idu, "require_tool"):
+            return idu.Shell("192.168.31.1")
+
+    def test_passwordless_probe_does_not_prompt(self):
+        shell = self._shell()
+        success = subprocess_result(0, "", "")
+        with (mock.patch.object(idu.subprocess, "run", return_value=success),
+              mock.patch.object(idu.getpass, "getpass") as prompt):
+            shell._ensure_authenticated()
+        self.assertTrue(shell._auth_checked)
+        prompt.assert_not_called()
+
+    def test_transport_failure_does_not_prompt_before_unlock(self):
+        shell = self._shell()
+        failure = subprocess_result(255, "", "ssh: connect to host: Connection refused")
+        with (mock.patch.object(idu.subprocess, "run", return_value=failure),
+              mock.patch.object(idu.getpass, "getpass") as prompt):
+            shell._ensure_authenticated()
+        self.assertTrue(shell._auth_checked)
+        prompt.assert_not_called()
+
+    def test_password_is_prompted_once_and_cached_in_memory(self):
+        shell = self._shell()
+        denied = subprocess_result(255, "", "Permission denied (publickey,password).")
+        accepted = subprocess_result(0, "", "")
+        with (mock.patch.object(idu.subprocess, "run", return_value=denied),
+              mock.patch.object(idu.getpass, "getpass", return_value="root-secret") as prompt,
+              mock.patch.object(idu.shutil, "which", return_value="/usr/bin/expect"),
+              mock.patch.object(idu, "_expect", return_value=accepted) as expect):
+            shell._ensure_authenticated()
+            shell._ensure_authenticated()
+        self.assertEqual(shell.password, "root-secret")
+        self.assertTrue(shell._auth_checked)
+        prompt.assert_called_once()
+        expect.assert_called_once()
+
+    def test_session_environment_password_is_reused(self):
+        with mock.patch.dict(os.environ, {"IDU_SSH_PASSWORD": "session-secret"}):
+            shell = self._shell()
+        self.assertEqual(shell.password, "session-secret")
+        self.assertTrue(shell._auth_checked)
+
+
+def subprocess_result(returncode, stdout, stderr):
+    return __import__("subprocess").CompletedProcess([], returncode, stdout, stderr)
+
+
 class ReleaseParsingTests(unittest.TestCase):
     def test_parses_patch_and_long_release_versions(self):
         self.assertEqual(idu._release("ARCNJIO_JIDU6101_R3.2.0"), (3, 2, 0))

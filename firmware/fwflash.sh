@@ -9,6 +9,7 @@
 #   ./fwflash.sh 6j01 --download-only
 #                                cache the images, flash nothing
 #   ./fwflash.sh 6101            unlock if needed, then flash a JIDU6101
+#   ./fwflash.sh 6j11 --legacy    flash only; require existing root SSH
 #
 # Options:
 #   --router HOST   stock unit address (default 192.168.31.1)
@@ -19,6 +20,7 @@
 #                   the sha256 of --image; without it you must still confirm
 #   --smallbuffers  6j11 only: flash the small-buffers sysupgrade build
 #   --download-only cache the images and stop
+#   --legacy       require existing root SSH; never invoke the unlocker
 #   --dry-run       print what would run, touch nothing
 #   --yes           skip the confirmation prompt
 #   -v, --verbose   show the per-command detail
@@ -49,6 +51,7 @@ IMAGE_SHA=""
 MODEL=""
 SMALLBUFFERS=0
 DOWNLOAD_ONLY=0
+LEGACY=0
 DRY_RUN=0
 ASSUME_YES=0
 VERBOSE=0
@@ -71,6 +74,7 @@ while [ $# -gt 0 ]; do
     --image-sha256)  IMAGE_SHA="$2"; shift 2 ;;
     --smallbuffers)  SMALLBUFFERS=1; shift ;;
     --download-only) DOWNLOAD_ONLY=1; shift ;;
+    --legacy)        LEGACY=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     --yes|-y)        ASSUME_YES=1; shift ;;
     -v|--verbose)    VERBOSE=1; shift ;;
@@ -263,7 +267,7 @@ else
   OWRT_KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/jidu-kh.XXXXXX")" || die "cannot create a temp file"
   FINAL_KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/jidu-final-kh.XXXXXX")" || die "cannot create a temp file"
   SSH_ERR="$(mktemp "${TMPDIR:-/tmp}/jidu-err.XXXXXX")" || die "cannot create a temp file"
-  trap 'rm -f "$STOCK_KNOWN_HOSTS" "$OWRT_KNOWN_HOSTS" "$FINAL_KNOWN_HOSTS" "$SSH_ERR"' EXIT
+  trap 'rm -f "$STOCK_KNOWN_HOSTS" "$OWRT_KNOWN_HOSTS" "$FINAL_KNOWN_HOSTS" "$SSH_ERR" "${EXPECT_WRAPPER:-}"' EXIT
 fi
 
 SSH=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STOCK_KNOWN_HOSTS" \
@@ -283,6 +287,32 @@ SCP_NEW=(scp -O -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OWRT
              -o LogLevel=ERROR)
 SSH_FINAL=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FINAL_KNOWN_HOSTS" \
                -o LogLevel=ERROR -o ConnectTimeout=5 "root@$OPENWRT")
+
+# If the parent flash.sh verified a password-protected stock SSH session,
+# reuse that session-only credential for all stock SSH/SCP commands here too.
+# The expect helper contains no credential; the password remains in the
+# inherited environment and is discarded when this process exits.
+EXPECT_WRAPPER=""
+if { [ "${IDU_SSH_PASSWORD_SET:-0}" = 1 ] || [ -n "${IDU_SSH_PASSWORD:-}" ]; } && [ "$DRY_RUN" = 0 ]; then
+  command -v expect >/dev/null 2>&1 || die "'expect' is required for password-authenticated SSH (sudo apt install expect)"
+  EXPECT_WRAPPER="$(mktemp "${TMPDIR:-/tmp}/idu-ssh-auth.XXXXXX")" || die "cannot create SSH helper"
+  cat > "$EXPECT_WRAPPER" <<'EXPECT'
+#!/usr/bin/expect -f
+set timeout 900
+set command $argv
+spawn {*}$command
+expect {
+    -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
+    -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
+    eof
+}
+catch wait result
+exit [lindex $result 3]
+EXPECT
+  chmod 700 "$EXPECT_WRAPPER"
+  SSH=(expect "$EXPECT_WRAPPER" "${SSH[@]}")
+  SCP=(expect "$EXPECT_WRAPPER" "${SCP[@]}")
+fi
 
 # The MFG partition is factory data that survives both firmware stages and is
 # unique to the physical unit. Hash it instead of trusting the reused
@@ -317,13 +347,20 @@ UNLOCKER="$HERE/../flash.sh"
 
 ensure_root_ssh() {
   if [ "$DRY_RUN" = 1 ]; then
-    say "would check root SSH on $STOCK, unlocking it first if it does not answer"
+    if [ "$LEGACY" = 1 ]; then
+      say "would require existing root SSH on $STOCK; unlock is disabled"
+    else
+      say "would check root SSH on $STOCK, unlocking it first if it does not answer"
+    fi
     return 0
   fi
   say "checking root SSH on $STOCK"
   if "${SSH[@]}" 'cat /proc/mtd >/dev/null' 2>/dev/null; then
     ok "root SSH is live"
     return 0
+  fi
+  if [ "$LEGACY" = 1 ]; then
+    die "legacy mode requires working root SSH; no unlock was attempted and nothing was flashed"
   fi
   warn "no root SSH yet: unlocking the unit now (it asks for the admin password)"
   [ -x "$UNLOCKER" ] || die "this unit is locked and $UNLOCKER is missing"

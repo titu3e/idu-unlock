@@ -140,6 +140,14 @@ backup in the current directory. `download` only caches verified firmware;
 `flash` performs the complete install after making a fresh backup on models
 with an automated SSH flash path.
 
+For normal unlock/backup/flash runs, a dedicated SSH key can be installed
+and reused for later connections. With `--skip-unlock`, if root SSH is
+password-protected and no `--key` is supplied, the script prompts for the
+current root SSH password, verifies it, and keeps it in memory only for the
+current backup/flash run. It does not remove or change the router's password.
+The first password-authenticated SSH run requires `expect` on Linux/macOS
+(Kali/Debian: `sudo apt install expect`). You can use `--key PATH` instead.
+
 If root SSH is **already enabled**, you can avoid running the unlock procedure
 again while backing up or flashing:
 

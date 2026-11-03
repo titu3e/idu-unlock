@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import dataclasses
 import errno
+import getpass
 import http.server
 import ipaddress
 import json
@@ -47,6 +48,7 @@ import string
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from urllib.parse import urlparse
 
@@ -538,11 +540,24 @@ def require_tool(name: str) -> None:
         "    Linux: install the openssh-client package (macOS has it built in).")
 
 
-def _expect(argv: list, password: str, timeout: int) -> subprocess.CompletedProcess:
-    """Run argv under expect, answering a password prompt once."""
+def _expect(argv: list, password: str, timeout: int, text: bool = True) -> subprocess.CompletedProcess:
+    """Run argv under expect, answering a password prompt once.
+
+    Pass the command through environment variables rather than command-line
+    arguments: with `expect -c`, trailing arguments can be interpreted as a
+    script filename instead of populating Tcl's `argv`.
+    """
     tcl = """
 set timeout __T__
-spawn {*}$argv
+set command {}
+for {set i 0} {$i < $env(IDU_ARGC)} {incr i} {
+    set key "IDU_ARGV_$i"
+    lappend command $env($key)
+}
+spawn {*}$command
+# The SSH child is attached to an Expect pty. Put it in raw mode so terminal
+# output processing cannot rewrite arbitrary bytes in firmware partition dumps.
+stty raw -echo
 expect {
     -re "(?i)password:"      { send "$env(IDU_PW)\\r"; exp_continue }
     -re "(?i)\\(yes/no\\)"   { send "yes\\r"; exp_continue }
@@ -551,79 +566,241 @@ expect {
 catch wait r
 exit [lindex $r 3]
 """.replace("__T__", str(timeout))
-    env = dict(os.environ, IDU_PW=password or "")
-    return subprocess.run(["expect", "-c", tcl] + argv, capture_output=True,
-                          text=True, timeout=timeout + 60, env=env)
+    env = dict(os.environ, IDU_PW=password or "", IDU_ARGC=str(len(argv)))
+    env.update({f"IDU_ARGV_{i}": str(arg) for i, arg in enumerate(argv)})
+    # SSH partition dumps are arbitrary binary data. Keep Expect's output
+    # as bytes; decoding it as UTF-8 corrupts or aborts firmware backups.
+    return subprocess.run(["expect", "-c", tcl], capture_output=True,
+                          text=text, timeout=timeout + 60, env=env)
+
+
+def _known_hosts_path() -> str:
+    """Use the invoking user's known_hosts even when the wrapper runs under sudo."""
+    home = os.path.expanduser("~")
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and os.name == "posix":
+        try:
+            import pwd
+            home = pwd.getpwnam(sudo_user).pw_dir
+        except (ImportError, KeyError):
+            pass
+    return os.path.join(home, ".ssh", "known_hosts")
 
 
 class Shell:
-    """ssh/scp to the router, authenticating by key or by password."""
+    """SSH/SCP transport with verified host keys and session-only password reuse."""
 
-    def __init__(self, host: str, key: str | None = None, password: str | None = None,
-                 user: str = "root"):
-        if key is None and password is None:
-            raise ValueError("Shell needs a key or a password")
+    def __init__(self, host: str, key: str | None = None,
+                 password: str | None = None, user: str = "root"):
         require_tool("ssh")
-        self.host, self.key, self.password = host, key, password
+        self.host, self.key = host, key
+        # A launcher may pass a session password to child processes through the
+        # environment. It is never written to disk.
+        self.password = (password if password is not None
+                         else os.environ.get("IDU_SSH_PASSWORD"))
         self.user = user
+        self.known_hosts = _known_hosts_path()
+        self._auth_checked = bool(key or self.password is not None)
 
-    # -- option building --------------------------------------------------- #
     def _opts(self) -> list:
-        opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        opts = ["-o", "StrictHostKeyChecking=accept-new",
+                "-o", f"UserKnownHostsFile={self.known_hosts}",
                 "-o", "ConnectTimeout=10"]
-        if self.password is None:
-            opts += ["-i", self.key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"]
-        else:
-            opts += ["-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1",
+        if self.key:
+            opts += ["-i", self.key, "-o", "IdentitiesOnly=yes",
+                     "-o", "BatchMode=yes"]
+        elif self.password is not None:
+            opts += ["-o", "PubkeyAuthentication=no",
+                     "-o", "NumberOfPasswordPrompts=1",
                      "-o", "PreferredAuthentications=password"]
+        elif self._auth_checked:
+            opts += ["-o", "BatchMode=yes"]
+        else:
+            opts += ["-o", "PreferredAuthentications=publickey,password,keyboard-interactive"]
         return opts
 
-    def _exec(self, argv: list, timeout: int) -> subprocess.CompletedProcess:
-        if self.password is None:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return _expect(argv, self.password, timeout)
+    def _ensure_authenticated(self, timeout: int = 12) -> None:
+        """Try non-interactive SSH first, then prompt once and cache in memory."""
+        if self._auth_checked:
+            return
+        if self.key:
+            self._auth_checked = True
+            return
 
-    # -- operations -------------------------------------------------------- #
+        probe = [
+            "ssh", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={self.known_hosts}",
+            "-o", "ConnectTimeout=10",
+            f"{self.user}@{self.host}", "true",
+        ]
+        # Keep host-key handling and known_hosts settings, but do not let this
+        # probe ask for a password. A successful probe means all later commands
+        # can remain non-interactive.
+        result = subprocess.run(probe, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                timeout=timeout)
+        diagnostic = (result.stderr or "") + (result.stdout or "")
+        if result.returncode == 0:
+            self._auth_checked = True
+            return
+
+        if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
+                or "Host key verification failed" in diagnostic):
+            print(diagnostic.strip(), file=sys.stderr)
+            answer = input(
+                f"The SSH host key for {self.host} changed. Remove the old "
+                "saved key and trust the key now presented? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                raise IduError("SSH host key was not changed; connection aborted.")
+            require_tool("ssh-keygen")
+            os.makedirs(os.path.dirname(self.known_hosts), exist_ok=True)
+            open(self.known_hosts, "a", encoding="utf-8").close()
+            removed = subprocess.run(
+                ["ssh-keygen", "-R", self.host, "-f", self.known_hosts],
+                capture_output=True, text=True)
+            if removed.returncode != 0:
+                raise IduError(f"could not update known_hosts: {removed.stderr.strip()}")
+            result = subprocess.run(probe, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    timeout=timeout)
+            if result.returncode == 0:
+                self._auth_checked = True
+                return
+            diagnostic = (result.stderr or "") + (result.stdout or "")
+
+        # A refused connection, timeout, or other transport failure means SSH
+        # is not ready; do not ask for a password before the unlock procedure.
+        if "Permission denied" not in diagnostic and "Authentication failed" not in diagnostic:
+            self._auth_checked = True
+            return
+
+        if shutil.which("expect") is None:
+            raise IduError(
+                "root SSH requires password authentication, but 'expect' is not installed.\n"
+                "    Install it on Kali/Debian with: sudo apt install expect")
+        for attempt in range(3):
+            self.password = getpass.getpass(
+                f"Root SSH password for {self.user}@{self.host}: ")
+            test = ["ssh"] + self._opts() + [
+                f"{self.user}@{self.host}", "true"]
+            checked = _expect(test, self.password, timeout)
+            if checked.returncode == 0:
+                self._auth_checked = True
+                print("[+] Root SSH authentication verified; password cached for this run.")
+                return
+            detail = checked.stderr or checked.stdout or b""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            detail = detail.strip()
+            self.password = None
+            if attempt < 2:
+                print("[-] SSH authentication failed; try again.", file=sys.stderr)
+        raise IduError(
+            "root SSH authentication failed after 3 attempts."
+            + (f"\n    {detail[:300]}" if detail else ""))
+
+    def _run(self, argv: list, timeout: int, stdout=subprocess.PIPE,
+             binary: bool = False):
+        self._ensure_authenticated(timeout)
+        text_output = not binary
+
+        def invoke():
+            if self.password is None:
+                return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE,
+                                      text=text_output,
+                                      timeout=timeout)
+
+            # Use OpenSSH's askpass mechanism instead of an Expect pty. A pty
+            # can echo prompts/spawn diagnostics into stdout and transform
+            # arbitrary bytes, which corrupts partition images and command
+            # output. The helper contains no secret; the password is inherited
+            # through the environment and the helper is removed immediately.
+            with tempfile.TemporaryDirectory(prefix="idu-askpass-") as tmp:
+                helper = os.path.join(tmp, "askpass")
+                with open(helper, "w", encoding="utf-8") as handle:
+                    handle.write("#!/bin/sh\nprintf '%s\\n' \"$IDU_SSH_PASSWORD\"\n")
+                os.chmod(helper, 0o700)
+                env = dict(os.environ)
+                env["SSH_ASKPASS"] = helper
+                env["SSH_ASKPASS_REQUIRE"] = "force"
+                env.setdefault("DISPLAY", "idu-askpass")
+                env["IDU_SSH_PASSWORD"] = self.password
+                return subprocess.run(
+                    argv, stdin=subprocess.DEVNULL, stdout=stdout,
+                    stderr=subprocess.PIPE, text=text_output,
+                    timeout=timeout, env=env)
+
+        result = invoke()
+        diagnostic = result.stderr or ""
+        if isinstance(diagnostic, bytes):
+            diagnostic = diagnostic.decode(errors="replace")
+        if isinstance(result.stdout, bytes):
+            diagnostic += result.stdout.decode(errors="replace")
+        elif isinstance(result.stdout, str):
+            diagnostic += result.stdout
+        if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
+                or "Host key verification failed" in diagnostic):
+            print(diagnostic.strip(), file=sys.stderr)
+            answer = input(
+                f"The SSH host key for {self.host} changed. Remove the old "
+                "saved key and trust the key now presented? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                raise IduError("SSH host key was not changed; connection aborted.")
+            require_tool("ssh-keygen")
+            os.makedirs(os.path.dirname(self.known_hosts), exist_ok=True)
+            open(self.known_hosts, "a", encoding="utf-8").close()
+            removed = subprocess.run(
+                ["ssh-keygen", "-R", self.host, "-f", self.known_hosts],
+                capture_output=True, text=True)
+            if removed.returncode != 0:
+                raise IduError(f"could not update known_hosts: {removed.stderr.strip()}")
+            print("[*] Old SSH host key removed; reconnecting and recording the new key.")
+            result = invoke()
+        return result
+
     def run(self, command: str, timeout: int = 300, check: bool = True) -> str:
         argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", command]
-        result = self._exec(argv, timeout)
+        result = self._run(argv, timeout)
         if check and result.returncode != 0:
-            raise IduError(f"remote command failed: {command}\n"
-                            f"    {result.stderr.strip()[:200]}")
-        return result.stdout
-
-    def send(self, local: str, remote: str, timeout: int = 900) -> None:
-        # -O forces the legacy scp protocol, which dropbear speaks.
-        require_tool("scp")
-        argv = ["scp", "-O"] + self._opts() + [local, f"{self.user}@{self.host}:{remote}"]
-        result = self._exec(argv, timeout)
-        if result.returncode != 0:
-            raise IduError(f"scp failed: {result.stderr.strip()[:200]}")
-
-    def fetch(self, remote: str, local: str, timeout: int = 900) -> None:
-        with open(local, "wb") as handle:
-            argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", f"cat {remote}"]
-            proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.PIPE)
-            _, err = proc.communicate(timeout=timeout)
-            if proc.returncode != 0:
-                raise IduError(f"read {remote} failed: {err.decode().strip()[:200]}")
+            detail = result.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            detail = detail.strip()
+            if isinstance(result.stdout, str) and result.stdout.strip():
+                detail = (detail + "\n" + result.stdout.strip()).strip()
+            raise IduError(f"remote command failed: {command}\n    {detail[:400] or 'SSH exited without diagnostic output'}")
+        return result.stdout or ""
 
     def alive(self, timeout: int = 12) -> bool:
         try:
-            result = self._exec(["ssh"] + self._opts()
-                                + [f"{self.user}@{self.host}", "true"], timeout)
+            argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", "true"]
+            result = self._run(argv, timeout)
             return result.returncode == 0
+        except IduError:
+            raise
         except Exception:  # noqa: BLE001
             return False
 
-    def wait(self, seconds: int, what: str, interval: int = 5) -> None:
-        print(f"[*] waiting up to {seconds}s for {what} ...", flush=True)
-        for _ in range(max(1, seconds // interval)):
-            if self.alive():
-                print(f"[+] {what} is reachable")
-                return
-            time.sleep(interval)
-        raise IduError(f"timed out waiting for {what}")
+    def send(self, local: str, remote: str, timeout: int = 900) -> None:
+        require_tool("scp")
+        argv = ["scp", "-O"] + self._opts() + [local, f"{self.user}@{self.host}:{remote}"]
+        result = self._run(argv, timeout)
+        if result.returncode != 0:
+            detail = result.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            raise IduError(f"scp failed: {detail.strip()[:400]}")
+
+    def fetch(self, remote: str, local: str, timeout: int = 900) -> None:
+        argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", f"cat {shlex.quote(remote)}"]
+        with open(local, "wb") as handle:
+            result = self._run(argv, timeout, stdout=handle, binary=True)
+        if result.returncode != 0:
+            detail = result.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            raise IduError(f"read {remote} failed: {detail.strip()[:400] or 'SSH exited without diagnostic output'}")
 
 
 # --------------------------------------------------------------------------- #
@@ -888,17 +1065,12 @@ def check(api: Api) -> Verdict:
 
 
 def _shell_for(key: str | None, host: str) -> Shell:
-    """The key if one was given, otherwise the passwordless root session.
-
-    With no key installed, `passwd -d root` means sshd accepts an empty password,
-    so this still works — but only where `expect` is available (macOS/Linux). On
-    Windows, pass --key to automate this.
-    """
+    """Use a supplied key, or let OpenSSH prompt for the root password."""
     if key:
         if not os.path.exists(key):
             raise IduError(f"no SSH key at {key} — create one, or drop --key")
         return Shell(host, key=key)
-    return Shell(host, password="")
+    return Shell(host)
 
 
 def _ssh_hint(key: str | None, host: str) -> str:
@@ -1293,17 +1465,32 @@ def backup(shell: Shell, outdir: str, include_full_chip: bool = False) -> str:
         print("[!] MFG layout: positional table, not KEY=VALUE — "
               f"named what could be identified, kept {len(slots)} slot(s) as-is")
 
-    print(f"[*] Backing up {len(parts)} partitions...")
+    # Count only partitions that will actually be written. Progress is
+    # partition-based (not a byte estimate), so the percentage is honest even
+    # when a partition takes much longer than another.
+    selected = [p for p in parts
+                if include_full_chip or p.device != "mtd0"]
+    total = len(selected)
+    completed = 0
+    print(f"[*] Backup: 0/{total} partitions (0%)", flush=True)
     for part in parts:
         if part.device == "mtd0" and not include_full_chip:
             print(f"    {part.name} skipped (pass --full-chip to include)")
             continue
         target = os.path.join(images, part.filename)
-        print(f"    {part.name:<14} {human_size(part.size)}")
-        if part.device == mfg.device:
-            os.replace(staged, target)          # already fetched, just file it
-            continue
-        shell.fetch(f"/dev/{part.device}", target)
+        print(f"[*] Reading {part.name} ({human_size(part.size)})", flush=True)
+        try:
+            if part.device == mfg.device:
+                os.replace(staged, target)      # already fetched, just file it
+            else:
+                shell.fetch(f"/dev/{part.device}", target)
+        except Exception as problem:
+            print(f"[-] {part.name}: failed", flush=True)
+            raise IduError(f"partition backup failed for {part.name}: {problem}") from problem
+        completed += 1
+        percent = int(completed * 100 / total) if total else 100
+        print(f"[+] {part.name}: complete — {completed}/{total} ({percent}%)",
+              flush=True)
     print(f"[+] Backup saved: {root}")
     return root
 
