@@ -636,6 +636,7 @@ class Shell:
                 raise IduError("SSH host key was not changed; connection aborted.")
             require_tool("ssh-keygen")
             os.makedirs(os.path.dirname(self.known_hosts), exist_ok=True)
+            open(self.known_hosts, "a", encoding="utf-8").close()
             removed = subprocess.run(
                 ["ssh-keygen", "-R", self.host, "-f", self.known_hosts],
                 capture_output=True, text=True)
