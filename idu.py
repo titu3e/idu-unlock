@@ -554,6 +554,9 @@ for {set i 0} {$i < $env(IDU_ARGC)} {incr i} {
     lappend command $env($key)
 }
 spawn {*}$command
+# The SSH child is attached to an Expect pty. Put it in raw mode so terminal
+# output processing cannot rewrite arbitrary bytes in firmware partition dumps.
+stty raw -echo
 expect {
     -re "(?i)password:"      { send "$env(IDU_PW)\\r"; exp_continue }
     -re "(?i)\\(yes/no\\)"   { send "yes\\r"; exp_continue }
