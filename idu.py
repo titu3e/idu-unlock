@@ -639,6 +639,36 @@ class Shell:
             self._auth_checked = True
             return
 
+        if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
+                or "Host key verification failed" in diagnostic):
+            print(diagnostic.strip(), file=sys.stderr)
+            answer = input(
+                f"The SSH host key for {self.host} changed. Remove the old "
+                "saved key and trust the key now presented? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                raise IduError("SSH host key was not changed; connection aborted.")
+            require_tool("ssh-keygen")
+            os.makedirs(os.path.dirname(self.known_hosts), exist_ok=True)
+            open(self.known_hosts, "a", encoding="utf-8").close()
+            removed = subprocess.run(
+                ["ssh-keygen", "-R", self.host, "-f", self.known_hosts],
+                capture_output=True, text=True)
+            if removed.returncode != 0:
+                raise IduError(f"could not update known_hosts: {removed.stderr.strip()}")
+            result = subprocess.run(probe, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    timeout=timeout)
+            if result.returncode == 0:
+                self._auth_checked = True
+                return
+            diagnostic = (result.stderr or "") + (result.stdout or "")
+
+        # A refused connection, timeout, or other transport failure means SSH
+        # is not ready; do not ask for a password before the unlock procedure.
+        if "Permission denied" not in diagnostic and "Authentication failed" not in diagnostic:
+            self._auth_checked = True
+            return
+
         require_tool("expect")
         for attempt in range(3):
             self.password = getpass.getpass(
