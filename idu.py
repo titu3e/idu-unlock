@@ -539,7 +539,7 @@ def require_tool(name: str) -> None:
         "    Linux: install the openssh-client package (macOS has it built in).")
 
 
-def _expect(argv: list, password: str, timeout: int) -> subprocess.CompletedProcess:
+def _expect(argv: list, password: str, timeout: int, text: bool = True) -> subprocess.CompletedProcess:
     """Run argv under expect, answering a password prompt once.
 
     Pass the command through environment variables rather than command-line
@@ -570,7 +570,7 @@ exit [lindex $r 3]
     # SSH partition dumps are arbitrary binary data. Keep Expect's output
     # as bytes; decoding it as UTF-8 corrupts or aborts firmware backups.
     return subprocess.run(["expect", "-c", tcl], capture_output=True,
-                          timeout=timeout + 60, env=env)
+                          text=text, timeout=timeout + 60, env=env)
 
 
 def _known_hosts_path() -> str:
@@ -699,18 +699,20 @@ class Shell:
             "root SSH authentication failed after 3 attempts."
             + (f"\n    {detail[:300]}" if detail else ""))
 
-    def _run(self, argv: list, timeout: int, stdout=subprocess.PIPE):
+    def _run(self, argv: list, timeout: int, stdout=subprocess.PIPE,
+             binary: bool = False):
         self._ensure_authenticated(timeout)
+        text_output = not binary
 
         def invoke():
             if self.password is None:
                 return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE,
-                                      text=(stdout == subprocess.PIPE),
+                                      text=text_output,
                                       timeout=timeout)
-            result = _expect(argv, self.password, timeout)
+            result = _expect(argv, self.password, timeout, text=text_output)
             if stdout != subprocess.PIPE:
                 stdout.write(result.stdout)
-                result.stdout = b""
+                result.stdout = "" if text_output else b""
             return result
 
         result = invoke()
@@ -777,7 +779,7 @@ class Shell:
     def fetch(self, remote: str, local: str, timeout: int = 900) -> None:
         argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", f"cat {shlex.quote(remote)}"]
         with open(local, "wb") as handle:
-            result = self._run(argv, timeout, stdout=handle)
+            result = self._run(argv, timeout, stdout=handle, binary=True)
         if result.returncode != 0:
             detail = result.stderr or ""
             if isinstance(detail, bytes):
