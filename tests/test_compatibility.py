@@ -48,6 +48,7 @@ class SessionSshAuthenticationTests(unittest.TestCase):
         accepted = subprocess_result(0, "", "")
         with (mock.patch.object(idu.subprocess, "run", return_value=denied),
               mock.patch.object(idu.getpass, "getpass", return_value="root-secret") as prompt,
+              mock.patch.object(idu.shutil, "which", return_value="/usr/bin/expect"),
               mock.patch.object(idu, "_expect", return_value=accepted) as expect):
             shell._ensure_authenticated()
             shell._ensure_authenticated()
