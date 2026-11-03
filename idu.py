@@ -1433,10 +1433,7 @@ def backup(shell: Shell, outdir: str, include_full_chip: bool = False) -> str:
     # fall back to model-serial so a unit we cannot parse is still identifiable
     label = (factory.get("WiFi-SSID")
              or "-".join(x for x in (model, serial) if x)
-             or "router-backup")
-    # Never let binary/diagnostic output or an unusual SSID create nested paths.
-    label = "".join(c if c.isalnum() or c in "-_." else "_"
-                    for c in label).strip("._")[:80] or "router-backup"
+             or "unknown-ssid")
     root = os.path.join(outdir, label)
     images = os.path.join(root, "backup")
     os.makedirs(images, exist_ok=True)
