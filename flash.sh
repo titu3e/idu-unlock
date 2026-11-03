@@ -167,51 +167,94 @@ describe() {
   NOBANNER=1        # shown once, above - don't repeat it on every later call
 }
 
-# ---- root SSH password: one prompt, reused by every child process -------- #
+# ---- persistent SSH key setup -------------------------------------------- #
 #
-# First test key/agent/passwordless SSH without prompting. Only a server that
-# explicitly rejects non-interactive authentication is treated as requiring a
-# root password; connection-refused/timeouts are left for the unlock flow.
+# A dedicated key is generated locally and installed once on an already
+# password-authenticated root SSH service. If SSH is not up yet, the unlock
+# payload installs the public key instead. The private key never leaves this
+# computer and the root password is never saved.
 prepare_root_ssh_auth() {
-  [ -n "$KEY" ] && return 0
-  local host probe rc candidate attempt
+  local host key_home pub probe candidate attempt remote_cmd
   host="$("$PY" -c 'from urllib.parse import urlparse; import sys; print(urlparse(sys.argv[1]).hostname or sys.argv[1])' "$ROUTER")" || return 1
+
+  if [ -z "$KEY" ]; then
+    key_home="$HOME"
+    if [ -n "${SUDO_USER:-}" ]; then
+      key_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+      [ -n "$key_home" ] || key_home="$HOME"
+    fi
+    KEY="$key_home/.ssh/idu-$host"
+  fi
+
+  mkdir -p "$(dirname "$KEY")" || { bad "cannot create SSH key directory"; return 1; }
+  chmod 700 "$(dirname "$KEY")"
+  if [ ! -f "$KEY" ]; then
+    command -v ssh-keygen >/dev/null 2>&1 || { bad "ssh-keygen is required"; return 1; }
+    say "Generating a dedicated SSH key: $KEY"
+    ssh-keygen -q -t ed25519 -N "" -C "idu-$host" -f "$KEY" || return 1
+  fi
+  [ -f "$KEY.pub" ] || { bad "public key is missing: $KEY.pub"; return 1; }
+  chmod 600 "$KEY"
+
+  if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "root@$host" true \
+      >/dev/null 2>&1; then
+    say "Dedicated SSH key already works."
+    return 0
+  fi
+
+  # If root SSH is not running yet, let the unlock installer add this key.
   probe="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    -o ConnectTimeout=5 "root@$host" true 2>&1)" && return 0
-  rc=$?
+    -o ConnectTimeout=5 "root@$host" true 2>&1 || true)"
   case "$probe" in
+    *"Connection refused"*|*"Connection timed out"*|*"No route to host"*|*"Operation timed out"*)
+      say "Root SSH is not available yet; the unlock step will install the public key."
+      return 0
+      ;;
     *"Permission denied"*|*"Authentication failed"*) ;;
-    *) return 0 ;;
+    *)
+      if [ -n "$KEY" ] && [ "$SKIP_UNLOCK" -eq 0 ]; then
+        say "SSH is not ready; the unlock step will install the public key."
+        return 0
+      fi
+      bad "cannot verify root SSH or install the key: $probe"
+      return 1
+      ;;
   esac
+
   command -v expect >/dev/null 2>&1 || {
-    bad "root SSH requires a password, but 'expect' is not installed."
-    bad "Install it with: sudo apt install expect"
+    bad "installing the SSH key requires expect: sudo apt install expect"
     return 1
   }
+  pub="$(cat "$KEY.pub")"
+  remote_cmd="$("$PY" -c 'import shlex,sys; k=sys.argv[1]; print("umask 077; mkdir -p /root/.ssh /etc/dropbear; touch /root/.ssh/authorized_keys /etc/dropbear/authorized_keys; grep -qxF " + shlex.quote(k) + " /root/.ssh/authorized_keys || printf %s\\\\n " + shlex.quote(k) + " >> /root/.ssh/authorized_keys; grep -qxF " + shlex.quote(k) + " /etc/dropbear/authorized_keys || printf %s\\\\n " + shlex.quote(k) + " >> /etc/dropbear/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys")' "$pub")" || return 1
+
   for attempt in 1 2 3; do
-    printf 'Root SSH password for root@%s: ' "$host"
+    printf 'Root SSH password for root@%s (used only to install your key): ' "$host"
     IFS= read -r -s candidate
     printf '\n'
-    if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" expect -c '
-      set timeout 15
-      set cmd [list ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "root@$env(IDU_HOST)" true]
-      spawn {*}$cmd
+    if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" IDU_REMOTE_CMD="$remote_cmd" expect -c '
+      set timeout 20
+      spawn ssh -T -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" $env(IDU_REMOTE_CMD)
       expect {
         -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\\r"; exp_continue }
         -re "(?i)\\(yes/no\\)" { send -- "yes\\r"; exp_continue }
+        timeout { exit 124 }
         eof
       }
       catch wait result
       exit [lindex $result 3]
     ' >/dev/null 2>&1; then
-      export IDU_SSH_PASSWORD="$candidate"
-      export IDU_SSH_PASSWORD_SET=1
       unset candidate
-      say "Root SSH password verified; reusing it for this run only."
-      return 0
+      if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+          -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$host" true \
+          >/dev/null 2>&1; then
+        say "SSH key installed and verified; future backup/flash runs won't need the root password."
+        return 0
+      fi
     fi
     unset candidate
-    bad "SSH authentication failed."
+    bad "Could not install or verify the SSH key."
   done
   return 1
 }
