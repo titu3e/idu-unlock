@@ -167,6 +167,54 @@ describe() {
   NOBANNER=1        # shown once, above - don't repeat it on every later call
 }
 
+# ---- root SSH password: one prompt, reused by every child process -------- #
+#
+# First test key/agent/passwordless SSH without prompting. Only a server that
+# explicitly rejects non-interactive authentication is treated as requiring a
+# root password; connection-refused/timeouts are left for the unlock flow.
+prepare_root_ssh_auth() {
+  [ -n "$KEY" ] && return 0
+  local host probe rc candidate attempt
+  host="$("$PY" -c 'from urllib.parse import urlparse; import sys; print(urlparse(sys.argv[1]).hostname or sys.argv[1])' "$ROUTER")" || return 1
+  probe="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=5 "root@$host" true 2>&1)" && return 0
+  rc=$?
+  case "$probe" in
+    *"Permission denied"*|*"Authentication failed"*) ;;
+    *) return 0 ;;
+  esac
+  command -v expect >/dev/null 2>&1 || {
+    bad "root SSH requires a password, but 'expect' is not installed."
+    bad "Install it with: sudo apt install expect"
+    return 1
+  }
+  for attempt in 1 2 3; do
+    printf 'Root SSH password for root@%s: ' "$host"
+    IFS= read -r -s candidate
+    printf '\n'
+    if IDU_SSH_PASSWORD="$candidate" expect -c '
+      set timeout 15
+      set cmd [list ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "root@$env(IDU_HOST)" true]
+      spawn {*}$cmd
+      expect {
+        -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\\r"; exp_continue }
+        -re "(?i)\\(yes/no\\)" { send -- "yes\\r"; exp_continue }
+        eof
+      }
+      catch wait result
+      exit [lindex $result 3]
+    ' IDU_HOST="$host" >/dev/null 2>&1; then
+      export IDU_SSH_PASSWORD="$candidate"
+      unset candidate
+      say "Root SSH password verified; reusing it for this run only."
+      return 0
+    fi
+    unset candidate
+    bad "SSH authentication failed."
+  done
+  return 1
+}
+
 ensure_root_ssh() {
   if [ "$SKIP_UNLOCK" -eq 1 ]; then
     say "Skipping unlock; backup will use the router's existing root SSH access."
@@ -225,6 +273,7 @@ case "$CMD" in
 
   backup)
     describe
+    prepare_root_ssh_auth || exit 1
     ensure_root_ssh || exit 1
     idu backup --outdir "$PWD" || exit 1
     ;;
@@ -241,6 +290,7 @@ case "$CMD" in
     }
     describe
     firmware_model >/dev/null || exit 1
+    prepare_root_ssh_auth || exit 1
     if [ "$SKIP_UNLOCK" -eq 1 ]; then
       say "Skipping unlock; using existing root SSH access."
     else
