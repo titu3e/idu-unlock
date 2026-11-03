@@ -3,6 +3,25 @@
 Work through this list before opening an issue. It covers almost every failure we
 have seen.
 
+## Backing up or flashing when root SSH is already enabled
+
+If a router already has working root SSH, use `--skip-unlock` to avoid running
+the unlock procedure again:
+
+```bash
+./flash.sh backup --skip-unlock
+./flash.sh flash --skip-unlock
+```
+
+The script still identifies the router through its admin API and the backup
+still connects over root SSH. If root SSH is not working, the backup will fail;
+remove `--skip-unlock` to let the normal unlock path run. The option does not
+bypass model/firmware checks or the stock backup before flashing. On Windows,
+`./flash.ps1 backup --skip-unlock` is supported; the PowerShell script does not
+perform firmware flashing.
+
+---
+
 ## Before anything else
 
 Two conditions cause most failures:
