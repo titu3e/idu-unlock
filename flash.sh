@@ -174,16 +174,20 @@ describe() {
 # payload installs the public key instead. The private key never leaves this
 # computer and the root password is never saved.
 prepare_root_ssh_auth() {
-  local host key_home pub probe candidate attempt remote_cmd
+  local host key_home known_hosts pub probe candidate attempt remote_cmd output status
+  local manage_key_owner=0 key_group
   host="$("$PY" -c 'from urllib.parse import urlparse; import sys; print(urlparse(sys.argv[1]).hostname or sys.argv[1])' "$ROUTER")" || return 1
 
+  key_home="$HOME"
+  if [ -n "${SUDO_USER:-}" ]; then
+    key_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    [ -n "$key_home" ] || key_home="$HOME"
+  fi
+  known_hosts="$key_home/.ssh/known_hosts"
+
   if [ -z "$KEY" ]; then
-    key_home="$HOME"
-    if [ -n "${SUDO_USER:-}" ]; then
-      key_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-      [ -n "$key_home" ] || key_home="$HOME"
-    fi
     KEY="$key_home/.ssh/idu-$host"
+    manage_key_owner=1
   fi
 
   mkdir -p "$(dirname "$KEY")" || { bad "cannot create SSH key directory"; return 1; }
@@ -194,9 +198,18 @@ prepare_root_ssh_auth() {
     ssh-keygen -q -t ed25519 -N "" -C "idu-$host" -f "$KEY" || return 1
   fi
   [ -f "$KEY.pub" ] || { bad "public key is missing: $KEY.pub"; return 1; }
+  if [ "$manage_key_owner" -eq 1 ] && [ -n "${SUDO_USER:-}" ]; then
+    key_group="$(id -gn "$SUDO_USER")" || return 1
+    chown "$SUDO_USER:$key_group" "$(dirname "$KEY")" "$KEY" "$KEY.pub" || {
+      bad "could not give the dedicated SSH key to $SUDO_USER"
+      return 1
+    }
+  fi
   chmod 600 "$KEY"
+  chmod 644 "$KEY.pub"
 
   if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o UserKnownHostsFile="$known_hosts" \
       -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "root@$host" true \
       >/dev/null 2>&1; then
     say "Dedicated SSH key already works."
@@ -204,8 +217,9 @@ prepare_root_ssh_auth() {
   fi
 
   # If root SSH is not running yet, let the unlock installer add this key.
-  probe="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    -o ConnectTimeout=5 "root@$host" true 2>&1 || true)"
+  probe="$(ssh -o BatchMode=yes -o UserKnownHostsFile="$known_hosts" \
+    -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
+    "root@$host" true 2>&1 || true)"
   case "$probe" in
     *"Connection refused"*|*"Connection timed out"*|*"No route to host"*|*"Operation timed out"*)
       say "Root SSH is not available yet; the unlock step will install the public key."
@@ -233,20 +247,21 @@ prepare_root_ssh_auth() {
     printf 'Root SSH password for root@%s (used only to install your key): ' "$host"
     IFS= read -r -s candidate
     printf '\n'
-    if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" IDU_REMOTE_CMD="$remote_cmd" expect -c '
+    if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" IDU_KNOWN_HOSTS="$known_hosts" IDU_REMOTE_CMD="$remote_cmd" expect -c '
       set timeout 20
-      spawn ssh -T -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" $env(IDU_REMOTE_CMD)
+      spawn ssh -T -o "UserKnownHostsFile=$env(IDU_KNOWN_HOSTS)" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" $env(IDU_REMOTE_CMD)
       expect {
-        -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\\r"; exp_continue }
-        -re "(?i)\\(yes/no\\)" { send -- "yes\\r"; exp_continue }
+        -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
+        -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
         timeout { exit 124 }
         eof
       }
       catch wait result
       exit [lindex $result 3]
-    ' >/dev/null 2>&1; then
+    '; then
       unset candidate
       if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+          -o UserKnownHostsFile="$known_hosts" \
           -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$host" true \
           >/dev/null 2>&1; then
         say "SSH key installed and verified; future backup/flash runs won't need the root password."
