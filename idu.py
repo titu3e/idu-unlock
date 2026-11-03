@@ -564,8 +564,10 @@ exit [lindex $r 3]
 """.replace("__T__", str(timeout))
     env = dict(os.environ, IDU_PW=password or "", IDU_ARGC=str(len(argv)))
     env.update({f"IDU_ARGV_{i}": str(arg) for i, arg in enumerate(argv)})
+    # SSH partition dumps are arbitrary binary data. Keep Expect's output
+    # as bytes; decoding it as UTF-8 corrupts or aborts firmware backups.
     return subprocess.run(["expect", "-c", tcl], capture_output=True,
-                          text=True, timeout=timeout + 60, env=env)
+                          timeout=timeout + 60, env=env)
 
 
 def _known_hosts_path() -> str:
@@ -683,7 +685,9 @@ class Shell:
                 self._auth_checked = True
                 print("[+] Root SSH authentication verified; password cached for this run.")
                 return
-            detail = checked.stderr or checked.stdout or ""
+            detail = checked.stderr or checked.stdout or b""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
             detail = detail.strip()
             self.password = None
             if attempt < 2:
@@ -702,15 +706,17 @@ class Shell:
                                       timeout=timeout)
             result = _expect(argv, self.password, timeout)
             if stdout != subprocess.PIPE:
-                stdout.write(result.stdout.encode())
-                result.stdout = ""
+                stdout.write(result.stdout)
+                result.stdout = b""
             return result
 
         result = invoke()
         diagnostic = result.stderr or ""
         if isinstance(diagnostic, bytes):
             diagnostic = diagnostic.decode(errors="replace")
-        if isinstance(result.stdout, str):
+        if isinstance(result.stdout, bytes):
+            diagnostic += result.stdout.decode(errors="replace")
+        elif isinstance(result.stdout, str):
             diagnostic += result.stdout
         if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
                 or "Host key verification failed" in diagnostic):
