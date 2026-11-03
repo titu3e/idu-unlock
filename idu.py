@@ -539,10 +539,20 @@ def require_tool(name: str) -> None:
 
 
 def _expect(argv: list, password: str, timeout: int) -> subprocess.CompletedProcess:
-    """Run argv under expect, answering a password prompt once."""
+    """Run argv under expect, answering a password prompt once.
+
+    Pass the command through environment variables rather than command-line
+    arguments: with `expect -c`, trailing arguments can be interpreted as a
+    script filename instead of populating Tcl's `argv`.
+    """
     tcl = """
 set timeout __T__
-spawn {*}$argv
+set command {}
+for {set i 0} {$i < $env(IDU_ARGC)} {incr i} {
+    set key "IDU_ARGV_$i"
+    lappend command $env($key)
+}
+spawn {*}$command
 expect {
     -re "(?i)password:"      { send "$env(IDU_PW)\\r"; exp_continue }
     -re "(?i)\\(yes/no\\)"   { send "yes\\r"; exp_continue }
@@ -551,8 +561,9 @@ expect {
 catch wait r
 exit [lindex $r 3]
 """.replace("__T__", str(timeout))
-    env = dict(os.environ, IDU_PW=password or "")
-    return subprocess.run(["expect", "-c", tcl] + argv, capture_output=True,
+    env = dict(os.environ, IDU_PW=password or "", IDU_ARGC=str(len(argv)))
+    env.update({f"IDU_ARGV_{i}": str(arg) for i, arg in enumerate(argv)})
+    return subprocess.run(["expect", "-c", tcl], capture_output=True,
                           text=True, timeout=timeout + 60, env=env)
 
 
