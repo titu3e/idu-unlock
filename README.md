@@ -140,6 +140,15 @@ backup in the current directory. `download` only caches verified firmware;
 `flash` performs the complete install after making a fresh backup on models
 with an automated SSH flash path.
 
+When root SSH is password-protected, `flash.sh backup` and
+`flash.sh flash` first test whether passwordless/key authentication works.
+If a root password is required, they prompt once, verify it, and reuse it for
+the backup and firmware-transfer commands in that run. The password is kept
+only in process memory/environment and is not written to a credential file.
+This password handling requires `expect` on Linux/macOS (Kali/Debian:
+`sudo apt install expect`). If SSH is already passwordless or key-based, no
+root SSH password prompt is needed.
+
 If root SSH is **already enabled**, you can avoid running the unlock procedure
 again while backing up or flashing:
 
