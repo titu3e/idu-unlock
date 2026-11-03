@@ -298,8 +298,8 @@ set timeout 900
 set command $argv
 spawn {*}$command
 expect {
-    -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\\r"; exp_continue }
-    -re "(?i)\\(yes/no\\)" { send -- "yes\\r"; exp_continue }
+    -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
+    -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
     eof
 }
 catch wait result
