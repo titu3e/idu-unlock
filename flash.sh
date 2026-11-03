@@ -192,7 +192,7 @@ prepare_root_ssh_auth() {
     printf 'Root SSH password for root@%s: ' "$host"
     IFS= read -r -s candidate
     printf '\n'
-    if IDU_SSH_PASSWORD="$candidate" expect -c '
+    if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" expect -c '
       set timeout 15
       set cmd [list ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "root@$env(IDU_HOST)" true]
       spawn {*}$cmd
@@ -203,7 +203,7 @@ prepare_root_ssh_auth() {
       }
       catch wait result
       exit [lindex $result 3]
-    ' IDU_HOST="$host" >/dev/null 2>&1; then
+    ' >/dev/null 2>&1; then
       export IDU_SSH_PASSWORD="$candidate"
       unset candidate
       say "Root SSH password verified; reusing it for this run only."
