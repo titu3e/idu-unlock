@@ -9,6 +9,7 @@
 #   ./flash.sh backup --skip-unlock  use existing root SSH; do not run unlock
 #   ./flash.sh download        detect the model, download + verify its OpenWrt images
 #   ./flash.sh flash           backup first, then download + install OpenWrt
+#   ./flash.sh flash --skip-unlock  use existing root SSH; skip unlock
 #   ./flash.sh detect          identify the model, change nothing
 #
 # Options:
@@ -55,7 +56,7 @@ say()  { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 bad()  { printf '\033[1;31m[-]\033[0m %s\n' "$*" >&2; }
 
 usage() {
-  sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
