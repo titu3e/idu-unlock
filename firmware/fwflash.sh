@@ -289,7 +289,7 @@ SSH_FINAL=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FINAL
 # The expect helper contains no credential; the password remains in the
 # inherited environment and is discarded when this process exits.
 EXPECT_WRAPPER=""
-if [ -n "${IDU_SSH_PASSWORD:-}" ] && [ "$DRY_RUN" = 0 ]; then
+if { [ "${IDU_SSH_PASSWORD_SET:-0}" = 1 ] || [ -n "${IDU_SSH_PASSWORD:-}" ]; } && [ "$DRY_RUN" = 0 ]; then
   command -v expect >/dev/null 2>&1 || die "'expect' is required for password-authenticated SSH (sudo apt install expect)"
   EXPECT_WRAPPER="$(mktemp "${TMPDIR:-/tmp}/idu-ssh-auth.XXXXXX")" || die "cannot create SSH helper"
   cat > "$EXPECT_WRAPPER" <<'EXPECT'
