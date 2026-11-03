@@ -140,6 +140,20 @@ backup in the current directory. `download` only caches verified firmware;
 `flash` performs the complete install after making a fresh backup on models
 with an automated SSH flash path.
 
+If root SSH is **already enabled**, you can avoid running the unlock procedure
+again while backing up or flashing:
+
+```bash
+./flash.sh backup --skip-unlock
+./flash.sh flash --skip-unlock
+```
+
+These commands still log in to the router's admin API to identify the device,
+and the backup step still requires working root SSH. `--skip-unlock` does not
+enable root access or bypass firmware compatibility checks; it simply skips
+the unlock attempt. On Windows, `./flash.ps1 backup --skip-unlock` is supported
+for backups.
+
 On macOS and Linux, unlocking uses a temporary HTTP callback on port 80. If the
 script says it cannot bind that port, run the command with `sudo`:
 

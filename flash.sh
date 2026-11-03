@@ -6,8 +6,10 @@
 #   ./flash.sh check           can this unit be unlocked? (read-only, safe to run in bulk)
 #   ./flash.sh unlock          root SSH only (persistent, survives reboots)
 #   ./flash.sh backup          unlock if needed, then save the stock device data
+#   ./flash.sh backup --skip-unlock  use existing root SSH; do not run unlock
 #   ./flash.sh download        detect the model, download + verify its OpenWrt images
 #   ./flash.sh flash           backup first, then download + install OpenWrt
+#   ./flash.sh flash --skip-unlock  use existing root SSH; skip unlock
 #   ./flash.sh detect          identify the model, change nothing
 #
 # Options:
@@ -18,6 +20,7 @@
 #                   SSH. Existing root SSH is left as found.
 #   --address IP    local address the router should call back on (VPN/WSL)
 #   --force         send the payloads even when check says NO (advanced)
+#   --skip-unlock   backup/flash using existing root SSH; do not run unlock
 #   -v, --verbose   show the per-command detail behind each method
 #
 # The router must be SET UP, not factory-fresh: a reset IDU keeps its API locked
@@ -43,6 +46,7 @@ PASSWORD="${PASSWORD:-}"
 KEY="${KEY:-}"
 ADDRESS="${ADDRESS:-}"
 FORCE=0
+SKIP_UNLOCK=0
 VERBOSE=0
 NOBANNER=0
 CMD=""
@@ -52,7 +56,7 @@ say()  { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 bad()  { printf '\033[1;31m[-]\033[0m %s\n' "$*" >&2; }
 
 usage() {
-  sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -63,6 +67,7 @@ while [ $# -gt 0 ]; do
     --key)      KEY="$2";      shift 2 ;;
     --address)  ADDRESS="$2";  shift 2 ;;
     --force)    FORCE=1;       shift ;;
+    --skip-unlock) SKIP_UNLOCK=1; shift ;;
     -v|--verbose) VERBOSE=1;   shift ;;
     -h|--help)  usage; exit 0 ;;
     -*)         bad "unknown option: $1"; usage; exit 2 ;;
@@ -70,6 +75,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$CMD" ] || CMD="auto"
+if [ "$SKIP_UNLOCK" -eq 1 ] && [ "$CMD" != "backup" ] && [ "$CMD" != "flash" ]; then
+  bad "--skip-unlock is only valid with backup or flash"
+  exit 2
+fi
 
 DETECTED_MODEL=""
 DETECTED_FAMILY=""
@@ -158,6 +167,14 @@ describe() {
   NOBANNER=1        # shown once, above - don't repeat it on every later call
 }
 
+ensure_root_ssh() {
+  if [ "$SKIP_UNLOCK" -eq 1 ]; then
+    say "Skipping unlock; backup will use the router's existing root SSH access."
+  else
+    idu unlock || return 1
+  fi
+}
+
 firmware_model() {
   case "$DETECTED_MODEL" in
     JIDU6101) echo "6101" ;;
@@ -208,7 +225,7 @@ case "$CMD" in
 
   backup)
     describe
-    idu unlock || exit 1
+    ensure_root_ssh || exit 1
     idu backup --outdir "$PWD" || exit 1
     ;;
 
@@ -224,9 +241,13 @@ case "$CMD" in
     }
     describe
     firmware_model >/dev/null || exit 1
-    say "Unlock enables persistent root SSH. If flashing fails, stock may remain unlocked."
+    if [ "$SKIP_UNLOCK" -eq 1 ]; then
+      say "Skipping unlock; using existing root SSH access."
+    else
+      say "Unlock enables persistent root SSH. If flashing fails, stock may remain unlocked."
+    fi
     say "Backing up stock firmware before flashing..."
-    idu unlock || exit 1
+    ensure_root_ssh || exit 1
     idu backup --outdir "$PWD" || exit 1
     run_firmware flash || exit 1
     ;;

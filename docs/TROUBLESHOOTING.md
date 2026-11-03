@@ -3,6 +3,25 @@
 Work through this list before opening an issue. It covers almost every failure we
 have seen.
 
+## Backing up or flashing when root SSH is already enabled
+
+If a router already has working root SSH, use `--skip-unlock` to avoid running
+the unlock procedure again:
+
+```bash
+./flash.sh backup --skip-unlock
+./flash.sh flash --skip-unlock
+```
+
+The script still identifies the router through its admin API and the backup
+still connects over root SSH. If root SSH is not working, the backup will fail;
+remove `--skip-unlock` to let the normal unlock path run. The option does not
+bypass model/firmware checks or the stock backup before flashing. On Windows,
+`./flash.ps1 backup --skip-unlock` is supported; the PowerShell script does not
+perform firmware flashing.
+
+---
+
 ## Before anything else
 
 Two conditions cause most failures:
@@ -144,6 +163,27 @@ networkingMode=mirrored
 Then run `wsl --shutdown`, reopen the distribution, and allow Python through
 Windows Firewall. A port proxy plus `--address` with the Windows LAN address also
 works, but is more moving parts.
+
+</details>
+
+<details>
+<summary><strong>Unlock reports a failed method / password-history probe</strong></summary>
+
+The unlocker now prints the specific API/probe error immediately after
+`Method 1/1: failed`. Read that message first. The generic callback URL advice
+does not apply when the password-history probe or `changeUserPassword` request
+failed before the installer payload was sent.
+
+For a MediaTek JIDU6101 on a version listed as `YES`, this is a runtime
+mismatch, not proof that the callback firewall is wrong. Do not use `--force`
+as a first response: it bypasses the safety check and may send the installer
+payload on a build whose vulnerable handler is absent.
+
+The probe makes one ordinary password change on the guest account. If the
+router accepted it but did not record a new `passwdHistory` entry, that guest
+account's password may now be the generated random value. The admin password
+is not changed. If the API rejected the probe, the printed response code and
+message are the important diagnostic evidence.
 
 </details>
 

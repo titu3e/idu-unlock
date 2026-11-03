@@ -172,6 +172,10 @@ class CompatibilityTests(unittest.TestCase):
         # the oldest stock rootfs confirmed to carry the vulnerable hash
         self.assert_state("JIO_JIDU6701_R2.0.19.6", "YES", model="JIDU6701")
 
+    def test_r3_1_0_is_confirmed_by_the_documented_range(self):
+        # R3.1.0 is inside the MTK R2.0.19.6-R3.2.0 confirmed window
+        self.assert_state("ARCNJIO_JIDU6101_R3.1.0", "YES")
+
     def test_r3_2_0_is_confirmed(self):
         # a member-confirmed working build on the MTK family
         self.assert_state("ARCNJIO_JIDU6101_R3.2.0", "YES")
@@ -317,6 +321,43 @@ class PasswordProbeTests(unittest.TestCase):
         self.run_vector(api, force=True)
         self.assertEqual(len(api.calls), 3)
         self.assertIn("$(", api.calls[1])
+
+
+class UnlockFailureDiagnosticsTests(unittest.TestCase):
+    def test_probe_error_is_reported_without_callback_misdirection(self):
+        class Shell:
+            def alive(self):
+                return False
+
+        class FakeCallback:
+            hits = []
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        api = mock.Mock(host="192.168.31.1")
+        api.session.return_value = contextlib.nullcontext()
+        with (mock.patch.object(idu, "_shell_for", return_value=Shell()),
+              mock.patch.object(idu, "callback_address", return_value="192.168.31.51"),
+              mock.patch.object(idu, "Callback", FakeCallback),
+              mock.patch.object(idu.PasswordVector, "execute",
+                                side_effect=idu.IduError(
+                                    "history probe rejected: ERR_INVALID_PASSWORD")),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            with self.assertRaises(idu.IduError) as caught:
+                idu.unlock(api, None, "admin-password", hint=False)
+
+        self.assertIn("history probe rejected: ERR_INVALID_PASSWORD", output.getvalue())
+        self.assertIn("all unlock attempts failed", str(caught.exception))
+        self.assertIn("history probe rejected: ERR_INVALID_PASSWORD",
+                      str(caught.exception))
+        self.assertNotIn("firewall is blocking", str(caught.exception))
 
 
 @unittest.skipIf(os.name == "nt", "POSIX bind errors")

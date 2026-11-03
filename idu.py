@@ -958,6 +958,7 @@ def unlock(api: Api, key_path: str | None, password: str, port: int = 80,
     if hint:
         print(f"[*] Callback: http://{address}:{port}/ "
               "(the router fetches the installer here)")
+    failures: list[str] = []
     with Callback(script, port=port) as beacon:
         for number, vector in enumerate(vectors, start=1):
             seen = len(beacon.hits)
@@ -967,20 +968,29 @@ def unlock(api: Api, key_path: str | None, password: str, port: int = 80,
             except UnsupportedFirmware:
                 raise
             except IduError as problem:
+                detail = str(problem).strip()
+                failures.append(detail)
                 print(f"    Method {number}/{total}: failed")
-                if VERBOSE:
-                    print(f"      {problem}")
+                # The probe runs before any callback payload. Always show its
+                # actual failure: hiding it behind the generic callback advice
+                # sent users to firewall troubleshooting for API-side errors.
+                for line in detail.splitlines():
+                    print(f"      {line}")
                 continue
 
             try:
                 shell.wait(60, "the router")
-            except IduError:
+            except IduError as problem:
                 if len(beacon.hits) > seen:
                     raise IduError(
                         "the installer ran but sshd never came up. Last beacon:\n"
                         f"    {beacon.hits[-1].replace(chr(10), chr(10) + '    ')}")
-                print(f"    Method {number}/{total}: failed (the router accepted "
-                      f"the payloads but never fetched http://{address}:{port}/)")
+                detail = (
+                    f"payloads were accepted but no callback arrived at "
+                    f"http://{address}:{port}/; {problem}")
+                failures.append(detail)
+                print(f"    Method {number}/{total}: failed")
+                print(f"      {detail}")
                 continue
 
             print(f"    Method {number}/{total}: success")
@@ -993,16 +1003,15 @@ def unlock(api: Api, key_path: str | None, password: str, port: int = 80,
             print("[+] SSH persistence enabled")
             return
 
-    raise IduError(
-        "the changeUserPassword method did not land:\n"
-        "    If the payloads were accepted, the router either did not execute\n"
-        "    them or could not reach this computer. Test the callback from\n"
-        f"    another device on the router's network: http://{address}:{port}/\n"
-        "    If that times out, a firewall is blocking it (on Windows, allow\n"
-        "    python on Private networks). If the address is wrong (VPN or\n"
-        "    multiple interfaces), pass --address with this computer's LAN\n"
-        "    address. The u-boot/UART console is this tool's fallback if the\n"
-        "    API itself is fixed.")
+    if failures:
+        details = "\\n".join(f"    {line}" for failure in failures
+                              for line in failure.splitlines())
+        raise IduError(
+            "all unlock attempts failed. Specific error:\\n"
+            f"{details}\\n"
+            "    Callback/firewall troubleshooting only applies when the "
+            "payload was accepted and the router was expected to fetch it.")
+    raise IduError("no unlock method completed.")
 
 
 # --------------------------------------------------------------------------- #
