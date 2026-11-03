@@ -140,17 +140,13 @@ backup in the current directory. `download` only caches verified firmware;
 `flash` performs the complete install after making a fresh backup on models
 with an automated SSH flash path.
 
-For root SSH, `flash.sh backup` and `flash.sh flash` use a dedicated
-Ed25519 key stored on your computer at `~/.ssh/idu-<router-host>` by default.
-If the key is not already authorised, the script asks for the router's root
-SSH password once and installs the public key in Dropbear's authorised-keys
-locations. The password is not saved. The private key stays on your computer
-and is reused for later backups and firmware transfers. When run with `sudo`,
-the key is stored in the invoking user's home directory. This first-time
-password-to-key setup requires `expect` on Linux/macOS (Kali/Debian:
-`sudo apt install expect`). You can override the key path with `--key PATH`.
-If root SSH is not running yet, the normal unlock step installs the public key
-as part of enabling root SSH.
+For normal unlock/backup/flash runs, a dedicated SSH key can be installed
+and reused for later connections. With `--skip-unlock`, if root SSH is
+password-protected and no `--key` is supplied, the script prompts for the
+current root SSH password, verifies it, and keeps it in memory only for the
+current backup/flash run. It does not remove or change the router's password.
+The first password-authenticated SSH run requires `expect` on Linux/macOS
+(Kali/Debian: `sudo apt install expect`). You can use `--key PATH` instead.
 
 If root SSH is **already enabled**, you can avoid running the unlock procedure
 again while backing up or flashing:
