@@ -10,6 +10,7 @@
 #   ./flash.sh download        detect the model, download + verify its OpenWrt images
 #   ./flash.sh flash           backup first, then download + install OpenWrt
 #   ./flash.sh flash --skip-unlock  use existing root SSH; skip unlock
+#   ./flash.sh flash --legacy       skip unlock and backup; require existing root SSH
 #   ./flash.sh detect          identify the model, change nothing
 #
 # Options:
@@ -21,6 +22,7 @@
 #   --address IP    local address the router should call back on (VPN/WSL)
 #   --force         send the payloads even when check says NO (advanced)
 #   --skip-unlock   backup/flash using existing root SSH; do not run unlock
+#   --legacy        flash only: skip unlock and backup; require existing root SSH
 #   -v, --verbose   show the per-command detail behind each method
 #
 # The router must be SET UP, not factory-fresh: a reset IDU keeps its API locked
@@ -47,6 +49,7 @@ KEY="${KEY:-}"
 ADDRESS="${ADDRESS:-}"
 FORCE=0
 SKIP_UNLOCK=0
+LEGACY=0
 VERBOSE=0
 NOBANNER=0
 CMD=""
@@ -68,6 +71,7 @@ while [ $# -gt 0 ]; do
     --address)  ADDRESS="$2";  shift 2 ;;
     --force)    FORCE=1;       shift ;;
     --skip-unlock) SKIP_UNLOCK=1; shift ;;
+    --legacy) LEGACY=1; shift ;;
     -v|--verbose) VERBOSE=1;   shift ;;
     -h|--help)  usage; exit 0 ;;
     -*)         bad "unknown option: $1"; usage; exit 2 ;;
@@ -75,6 +79,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$CMD" ] || CMD="auto"
+if [ "$LEGACY" -eq 1 ] && [ "$CMD" != "flash" ]; then
+  bad "--legacy is only valid with flash"
+  exit 2
+fi
+if [ "$LEGACY" -eq 1 ] && [ "$SKIP_UNLOCK" -eq 1 ]; then
+  bad "--legacy already skips unlock; do not combine it with --skip-unlock"
+  exit 2
+fi
 if [ "$SKIP_UNLOCK" -eq 1 ] && [ "$CMD" != "backup" ] && [ "$CMD" != "flash" ]; then
   bad "--skip-unlock is only valid with backup or flash"
   exit 2
@@ -409,6 +421,7 @@ run_firmware() {
   local args=( "$model" --router "$host" )
   [ "$VERBOSE" -eq 1 ] && args+=( --verbose )
   [ "$action" = "download" ] && args+=( --download-only )
+  [ "$LEGACY" -eq 1 ] && args+=( --legacy )
 
   PASSWORD="$PASSWORD" KEY="$KEY" ADDRESS="$ADDRESS" \
     "$flasher" "${args[@]}"
@@ -448,16 +461,24 @@ case "$CMD" in
     }
     describe
     firmware_model >/dev/null || exit 1
-    prepare_root_ssh_auth || exit 1
-    if [ "$SKIP_UNLOCK" -eq 1 ]; then
-      say "Skipping unlock; using existing root SSH access."
+    if [ "$LEGACY" -eq 1 ]; then
+      # Legacy mode never unlocks or backs up. Verify existing root SSH and
+      # retain a password in memory only when password authentication is used.
+      prepare_skip_unlock_password_auth || exit 1
+      say "Legacy flash: skipping unlock and stock backup."
+      run_firmware flash || exit 1
     else
-      say "Unlock enables persistent root SSH. If flashing fails, stock may remain unlocked."
+      prepare_root_ssh_auth || exit 1
+      if [ "$SKIP_UNLOCK" -eq 1 ]; then
+        say "Skipping unlock; using existing root SSH access."
+      else
+        say "Unlock enables persistent root SSH. If flashing fails, stock may remain unlocked."
+      fi
+      say "Backing up stock firmware before flashing..."
+      ensure_root_ssh || exit 1
+      idu backup --outdir "$PWD" || exit 1
+      run_firmware flash || exit 1
     fi
-    say "Backing up stock firmware before flashing..."
-    ensure_root_ssh || exit 1
-    idu backup --outdir "$PWD" || exit 1
-    run_firmware flash || exit 1
     ;;
 
   auto)
