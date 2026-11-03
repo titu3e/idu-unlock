@@ -319,6 +319,41 @@ class PasswordProbeTests(unittest.TestCase):
         self.assertIn("$(", api.calls[1])
 
 
+class UnlockFailureDiagnosticsTests(unittest.TestCase):
+    def test_probe_error_is_reported_without_callback_misdirection(self):
+        class Shell:
+            def alive(self):
+                return False
+
+        class FakeCallback:
+            hits = []
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        api = mock.Mock(host="192.168.31.1")
+        api.session.return_value = contextlib.nullcontext()
+        with (mock.patch.object(idu, "_shell_for", return_value=Shell()),
+              mock.patch.object(idu, "callback_address", return_value="192.168.31.51"),
+              mock.patch.object(idu, "Callback", FakeCallback),
+              mock.patch.object(idu.PasswordVector, "execute",
+                                side_effect=idu.IduError(
+                                    "history probe rejected: ERR_INVALID_PASSWORD")),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            with self.assertRaises(idu.IduError) as caught:
+                idu.unlock(api, None, "admin-password", hint=False)
+
+        self.assertIn("history probe rejected: ERR_INVALID_PASSWORD", output.getvalue())
+        self.assertIn("all unlock attempts failed", str(caught.exception))
+        self.assertNotIn("firewall is blocking", str(caught.exception))
+
+
 @unittest.skipIf(os.name == "nt", "POSIX bind errors")
 class PortErrorTests(unittest.TestCase):
     def test_permission_denied_explains_root_not_lsof(self):
