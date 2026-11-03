@@ -267,7 +267,7 @@ else
   OWRT_KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/jidu-kh.XXXXXX")" || die "cannot create a temp file"
   FINAL_KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/jidu-final-kh.XXXXXX")" || die "cannot create a temp file"
   SSH_ERR="$(mktemp "${TMPDIR:-/tmp}/jidu-err.XXXXXX")" || die "cannot create a temp file"
-  trap 'rm -f "$STOCK_KNOWN_HOSTS" "$OWRT_KNOWN_HOSTS" "$FINAL_KNOWN_HOSTS" "$SSH_ERR" "${EXPECT_WRAPPER:-}"' EXIT
+  trap 'rm -f "$STOCK_KNOWN_HOSTS" "$OWRT_KNOWN_HOSTS" "$FINAL_KNOWN_HOSTS" "$SSH_ERR" "${ASKPASS_HELPER:-}"' EXIT
 fi
 
 SSH=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STOCK_KNOWN_HOSTS" \
@@ -290,28 +290,21 @@ SSH_FINAL=(ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FINAL
 
 # If the parent flash.sh verified a password-protected stock SSH session,
 # reuse that session-only credential for all stock SSH/SCP commands here too.
-# The expect helper contains no credential; the password remains in the
-# inherited environment and is discarded when this process exits.
-EXPECT_WRAPPER=""
+# OpenSSH_ASKPASS keeps the password out of argv and avoids Expect's PTY,
+# which merges SSH prompts/diagnostics into command-substitution stdout.
+ASKPASS_HELPER=""
 if { [ "${IDU_SSH_PASSWORD_SET:-0}" = 1 ] || [ -n "${IDU_SSH_PASSWORD:-}" ]; } && [ "$DRY_RUN" = 0 ]; then
-  command -v expect >/dev/null 2>&1 || die "'expect' is required for password-authenticated SSH (sudo apt install expect)"
-  EXPECT_WRAPPER="$(mktemp "${TMPDIR:-/tmp}/idu-ssh-auth.XXXXXX")" || die "cannot create SSH helper"
-  cat > "$EXPECT_WRAPPER" <<'EXPECT'
-#!/usr/bin/expect -f
-set timeout 900
-set command $argv
-spawn -noecho {*}$command
-expect {
-    -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
-    -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
-    eof
-}
-catch wait result
-exit [lindex $result 3]
-EXPECT
-  chmod 700 "$EXPECT_WRAPPER"
-  SSH=(expect "$EXPECT_WRAPPER" "${SSH[@]}")
-  SCP=(expect "$EXPECT_WRAPPER" "${SCP[@]}")
+  ASKPASS_HELPER="$(mktemp "${TMPDIR:-/tmp}/idu-ssh-askpass.XXXXXX")" || die "cannot create SSH askpass helper"
+  cat > "$ASKPASS_HELPER" <<'ASKPASS'
+#!/bin/sh
+printf '%s\\n' "$IDU_SSH_PASSWORD"
+ASKPASS
+  chmod 700 "$ASKPASS_HELPER"
+  export SSH_ASKPASS="$ASKPASS_HELPER"
+  export SSH_ASKPASS_REQUIRE=force
+  export DISPLAY="${DISPLAY:-idu-ssh-askpass:0}"
+  SSH+=( -o PubkeyAuthentication=no -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 -o LogLevel=ERROR )
+  SCP+=( -o PubkeyAuthentication=no -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 -o LogLevel=ERROR )
 fi
 
 # The MFG partition is factory data that survives both firmware stages and is
