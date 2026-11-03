@@ -205,6 +205,7 @@ prepare_root_ssh_auth() {
       exit [lindex $result 3]
     ' >/dev/null 2>&1; then
       export IDU_SSH_PASSWORD="$candidate"
+      export IDU_SSH_PASSWORD_SET=1
       unset candidate
       say "Root SSH password verified; reusing it for this run only."
       return 0
