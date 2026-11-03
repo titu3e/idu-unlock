@@ -621,7 +621,9 @@ class Shell:
             return result
 
         result = invoke()
-        diagnostic = (result.stderr or "")
+        diagnostic = result.stderr or ""
+        if isinstance(diagnostic, bytes):
+            diagnostic = diagnostic.decode(errors="replace")
         if isinstance(result.stdout, str):
             diagnostic += result.stdout
         if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
@@ -647,18 +649,17 @@ class Shell:
         argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", command]
         result = self._run(argv, timeout)
         if check and result.returncode != 0:
-            detail = (result.stderr or "").strip()
+            detail = result.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            detail = detail.strip()
             if isinstance(result.stdout, str) and result.stdout.strip():
-                detail = (detail + "\\n" + result.stdout.strip()).strip()
-            raise IduError(f"remote command failed: {command}\\n    {detail[:400] or 'SSH exited without diagnostic output'}")
+                detail = (detail + "\n" + result.stdout.strip()).strip()
+            raise IduError(f"remote command failed: {command}\n    {detail[:400] or 'SSH exited without diagnostic output'}")
         return result.stdout or ""
 
     def alive(self, timeout: int = 12) -> bool:
         try:
-            result = self.run("true", timeout=timeout, check=False)
-            # run() returns stdout only; inspect the SSH exit status directly
-            # so an authentication/connection failure is never mistaken for
-            # a live root shell.
             argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", "true"]
             result = self._run(argv, timeout)
             return result.returncode == 0
@@ -677,8 +678,10 @@ class Shell:
         with open(local, "wb") as handle:
             result = self._run(argv, timeout, stdout=handle)
         if result.returncode != 0:
-            detail = (result.stderr or "").strip()
-            raise IduError(f"read {remote} failed: {detail[:400] or 'SSH exited without diagnostic output'}")
+            detail = result.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            raise IduError(f"read {remote} failed: {detail.strip()[:400] or 'SSH exited without diagnostic output'}")
 
 
 # --------------------------------------------------------------------------- #
