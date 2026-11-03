@@ -308,13 +308,29 @@ prepare_skip_unlock_password_auth() {
     return 1
   fi
 
+  # Prefer an existing key (including ssh-agent) without requiring Expect.
+  probe="$(ssh -o BatchMode=yes -o UserKnownHostsFile="$known_hosts" \
+    -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
+    "root@$host" true 2>&1 || true)"
+  if [ -z "$probe" ]; then
+    say "Root SSH key authentication already works."
+    return 0
+  fi
+  case "$probe" in
+    *"Permission denied"*|*"Authentication failed"*) ;;
+    *)
+      bad "root SSH is not reachable or host verification failed: $probe"
+      return 1
+      ;;
+  esac
+
   command -v expect >/dev/null 2>&1 || {
     bad "automated SSH password authentication requires expect: sudo apt install expect"
     return 1
   }
 
-  # First test a genuinely empty password (without accidentally accepting an
-  # SSH-agent key). This covers routers already unlocked by the original tool.
+  # First test a genuinely empty password. This covers routers already
+  # unlocked by the original tool.
   if IDU_HOST="$host" IDU_KNOWN_HOSTS="$known_hosts" expect -c '
     set timeout 12
     spawn ssh -T -o "UserKnownHostsFile=$env(IDU_KNOWN_HOSTS)" -o PubkeyAuthentication=no -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" true
@@ -332,22 +348,6 @@ prepare_skip_unlock_password_auth() {
     say "Root SSH accepts an empty password."
     return 0
   fi
-
-  # A key already available through the user's SSH agent is also fine.
-  probe="$(ssh -o BatchMode=yes -o UserKnownHostsFile="$known_hosts" \
-    -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
-    "root@$host" true 2>&1 || true)"
-  if [ -z "$probe" ]; then
-    say "Root SSH key authentication already works."
-    return 0
-  fi
-  case "$probe" in
-    *"Permission denied"*|*"Authentication failed"*) ;;
-    *)
-      bad "root SSH is not reachable or host verification failed: $probe"
-      return 1
-      ;;
-  esac
 
   for attempt in 1 2; do
     printf 'Root SSH password for root@%s: ' "$host"
