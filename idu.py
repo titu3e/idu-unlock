@@ -621,10 +621,13 @@ class Shell:
             self._auth_checked = True
             return
 
-        probe = ["ssh", "-o", "BatchMode=yes"] + [
-            option for option in self._opts()
-            if option not in ("-o", "PreferredAuthentications=publickey,password,keyboard-interactive")
-        ] + [f"{self.user}@{self.host}", "true"]
+        probe = [
+            "ssh", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={self.known_hosts}",
+            "-o", "ConnectTimeout=10",
+            f"{self.user}@{self.host}", "true",
+        ]
         # Keep host-key handling and known_hosts settings, but do not let this
         # probe ask for a password. A successful probe means all later commands
         # can remain non-interactive.
@@ -634,12 +637,6 @@ class Shell:
         diagnostic = (result.stderr or "") + (result.stdout or "")
         if result.returncode == 0:
             self._auth_checked = True
-            return
-
-        if ("REMOTE HOST IDENTIFICATION HAS CHANGED" in diagnostic
-                or "Host key verification failed" in diagnostic):
-            # Reuse the normal, explicit host-key-change confirmation path.
-            self._run(probe, timeout)
             return
 
         require_tool("expect")
