@@ -394,13 +394,37 @@ prepare_skip_unlock_password_auth() {
     return 1
   fi
 
+  command -v expect >/dev/null 2>&1 || {
+    bad "automated SSH password authentication requires expect: sudo apt install expect"
+    return 1
+  }
+
+  # First test a genuinely empty password (without accidentally accepting an
+  # SSH-agent key). This covers routers already unlocked by the original tool.
+  if IDU_HOST="$host" IDU_KNOWN_HOSTS="$known_hosts" expect -c '
+    set timeout 12
+    spawn ssh -T -o "UserKnownHostsFile=$env(IDU_KNOWN_HOSTS)" -o PubkeyAuthentication=no -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" true
+    expect {
+      -re "(?i)password:" { send -- "\r"; exp_continue }
+      -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
+      timeout { exit 124 }
+      eof
+    }
+    catch wait result
+    exit [lindex $result 3]
+  '; then
+    export IDU_SSH_PASSWORD=""
+    export IDU_SSH_PASSWORD_SET=1
+    say "Root SSH accepts an empty password."
+    return 0
+  fi
+
+  # A key already available through the user's SSH agent is also fine.
   probe="$(ssh -o BatchMode=yes -o UserKnownHostsFile="$known_hosts" \
     -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
     "root@$host" true 2>&1 || true)"
   if [ -z "$probe" ]; then
-    export IDU_SSH_PASSWORD=""
-    export IDU_SSH_PASSWORD_SET=1
-    say "Root SSH already accepts an empty password."
+    say "Root SSH key authentication already works."
     return 0
   fi
   case "$probe" in
@@ -411,10 +435,6 @@ prepare_skip_unlock_password_auth() {
       ;;
   esac
 
-  command -v expect >/dev/null 2>&1 || {
-    bad "password-authenticated SSH requires expect: sudo apt install expect"
-    return 1
-  }
   for attempt in 1 2; do
     printf 'Root SSH password for root@%s: ' "$host"
     IFS= read -r -s candidate </dev/tty || return 1
@@ -442,7 +462,6 @@ prepare_skip_unlock_password_auth() {
   done
   return 1
 }
-
 prepare_root_ssh_auth() {
   if [ "$SKIP_UNLOCK" -eq 1 ]; then
     prepare_skip_unlock_password_auth
