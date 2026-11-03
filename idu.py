@@ -653,6 +653,18 @@ class Shell:
             raise IduError(f"remote command failed: {command}\\n    {detail[:400] or 'SSH exited without diagnostic output'}")
         return result.stdout or ""
 
+    def alive(self, timeout: int = 12) -> bool:
+        try:
+            result = self.run("true", timeout=timeout, check=False)
+            # run() returns stdout only; inspect the SSH exit status directly
+            # so an authentication/connection failure is never mistaken for
+            # a live root shell.
+            argv = ["ssh"] + self._opts() + [f"{self.user}@{self.host}", "true"]
+            result = self._run(argv, timeout)
+            return result.returncode == 0
+        except Exception:  # noqa: BLE001
+            return False
+
     def send(self, local: str, remote: str, timeout: int = 900) -> None:
         require_tool("scp")
         argv = ["scp", "-O"] + self._opts() + [local, f"{self.user}@{self.host}:{remote}"]
@@ -931,12 +943,7 @@ def check(api: Api) -> Verdict:
 
 
 def _shell_for(key: str | None, host: str) -> Shell:
-    """The key if one was given, otherwise the passwordless root session.
-
-    With no key installed, `passwd -d root` means sshd accepts an empty password,
-    so this still works — but only where `expect` is available (macOS/Linux). On
-    Windows, pass --key to automate this.
-    """
+    """Use a supplied key, or let OpenSSH prompt for the root password."""
     if key:
         if not os.path.exists(key):
             raise IduError(f"no SSH key at {key} — create one, or drop --key")
