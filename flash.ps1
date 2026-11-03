@@ -16,6 +16,7 @@ Options:
                   nothing of ours is installed on the router
   --address IP    local address the router should call back on (VPN/WSL)
   --force         send the payloads even when check says NO (advanced)
+  --skip-unlock   backup using existing root SSH; do not run unlock
   -v, --verbose   show the per-command detail behind each method
 
 The router must be SET UP, not factory-fresh: a reset IDU keeps its API locked
@@ -52,6 +53,7 @@ Commands:
   check     can this unit be unlocked? (read-only, safe to run in bulk)
   unlock    root SSH only (persistent, survives reboots)
   backup    factory credentials + a copy of every partition
+            --skip-unlock uses existing root SSH without running unlock
   detect    identify the model, change nothing
 
 Options:
@@ -72,6 +74,7 @@ $Password = if ($env:PASSWORD) { $env:PASSWORD } else { '' }
 $Key      = if ($env:KEY)      { $env:KEY }      else { '' }
 $Address  = if ($env:ADDRESS)  { $env:ADDRESS }  else { '' }
 $Force    = $false
+$SkipUnlock = $false
 $ShowVerbose = $false
 $NoBanner    = $false
 
@@ -100,6 +103,7 @@ while ($index -lt $args.Count) {
     $index++; $Address = [string]$args[$index]
   }
   elseif ($token -in @('--force', '-force')) { $Force = $true }
+  elseif ($token -eq '--skip-unlock') { $SkipUnlock = $true }
   elseif ($token -in @('-v', '--verbose', '-verbose')) { $ShowVerbose = $true }
   elseif ($token -in @('unlock', 'backup', 'detect', 'check')) {
     $Command = $token
@@ -117,6 +121,10 @@ while ($index -lt $args.Count) {
   $index++
 }
 if (-not $Command) { $Command = 'auto' }
+if ($SkipUnlock -and $Command -ne 'backup') {
+  Bad '--skip-unlock is only valid with the backup command in flash.ps1'
+  exit 2
+}
 
 # ---- an interpreter that has `requests` ---------------------------------- #
 #
@@ -292,7 +300,10 @@ switch ($Command) {
 
   'backup' {
     Confirm-Device
-    if ((Invoke-Id @('unlock')) -ne 0) { exit 1 }
+    if ($SkipUnlock) {
+      Say 'Skipping unlock; backup will use the router''s existing root SSH access.'
+    }
+    elseif ((Invoke-Id @('unlock')) -ne 0) { exit 1 }
     if ((Invoke-Id @('backup', '--outdir', $OutDir)) -ne 0) { exit 1 }
   }
 
