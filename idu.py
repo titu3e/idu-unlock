@@ -719,7 +719,7 @@ class Shell:
             with tempfile.TemporaryDirectory(prefix="idu-askpass-") as tmp:
                 helper = os.path.join(tmp, "askpass")
                 with open(helper, "w", encoding="utf-8") as handle:
-                    handle.write("#!/bin/sh\\nprintf '%s\\\\n' \"$IDU_SSH_PASSWORD\"\\n")
+                    handle.write("#!/bin/sh\nprintf '%s\\n' \"$IDU_SSH_PASSWORD\"\n")
                 os.chmod(helper, 0o700)
                 env = dict(os.environ)
                 env["SSH_ASKPASS"] = helper
