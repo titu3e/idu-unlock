@@ -245,11 +245,11 @@ prepare_root_ssh_auth() {
 
   for attempt in 1 2 3; do
     printf 'Root SSH password for root@%s (used only to install your key): ' "$host"
-    IFS= read -r -s candidate
+    IFS= read -r -s candidate </dev/tty || return 1
     printf '\n'
     if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" IDU_KNOWN_HOSTS="$known_hosts" IDU_REMOTE_CMD="$remote_cmd" expect -c '
       set timeout 20
-      spawn ssh -T -o "UserKnownHostsFile=$env(IDU_KNOWN_HOSTS)" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" $env(IDU_REMOTE_CMD)
+      spawn ssh -T -o "UserKnownHostsFile=$env(IDU_KNOWN_HOSTS)" -o PubkeyAuthentication=no -o PreferredAuthentications=password -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" $env(IDU_REMOTE_CMD)
       expect {
         -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
         -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
