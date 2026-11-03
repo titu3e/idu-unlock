@@ -48,6 +48,7 @@ import string
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from urllib.parse import urlparse
 
@@ -709,11 +710,26 @@ class Shell:
                 return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE,
                                       text=text_output,
                                       timeout=timeout)
-            result = _expect(argv, self.password, timeout, text=text_output)
-            if stdout != subprocess.PIPE:
-                stdout.write(result.stdout)
-                result.stdout = "" if text_output else b""
-            return result
+
+            # Use OpenSSH's askpass mechanism instead of an Expect pty. A pty
+            # can echo prompts/spawn diagnostics into stdout and transform
+            # arbitrary bytes, which corrupts partition images and command
+            # output. The helper contains no secret; the password is inherited
+            # through the environment and the helper is removed immediately.
+            with tempfile.TemporaryDirectory(prefix="idu-askpass-") as tmp:
+                helper = os.path.join(tmp, "askpass")
+                with open(helper, "w", encoding="utf-8") as handle:
+                    handle.write("#!/bin/sh\\nprintf '%s\\\\n' \"$IDU_SSH_PASSWORD\"\\n")
+                os.chmod(helper, 0o700)
+                env = dict(os.environ)
+                env["SSH_ASKPASS"] = helper
+                env["SSH_ASKPASS_REQUIRE"] = "force"
+                env.setdefault("DISPLAY", "idu-askpass")
+                env["IDU_SSH_PASSWORD"] = self.password
+                return subprocess.run(
+                    argv, stdin=subprocess.DEVNULL, stdout=stdout,
+                    stderr=subprocess.PIPE, text=text_output,
+                    timeout=timeout, env=env)
 
         result = invoke()
         diagnostic = result.stderr or ""
@@ -1417,7 +1433,10 @@ def backup(shell: Shell, outdir: str, include_full_chip: bool = False) -> str:
     # fall back to model-serial so a unit we cannot parse is still identifiable
     label = (factory.get("WiFi-SSID")
              or "-".join(x for x in (model, serial) if x)
-             or "unknown-ssid")
+             or "router-backup")
+    # Never let binary/diagnostic output or an unusual SSID create nested paths.
+    label = "".join(c if c.isalnum() or c in "-_." else "_"
+                    for c in label).strip("._")[:80] or "router-backup"
     root = os.path.join(outdir, label)
     images = os.path.join(root, "backup")
     os.makedirs(images, exist_ok=True)
