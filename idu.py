@@ -669,7 +669,10 @@ class Shell:
             self._auth_checked = True
             return
 
-        require_tool("expect")
+        if shutil.which("expect") is None:
+            raise IduError(
+                "root SSH requires password authentication, but 'expect' is not installed.\n"
+                "    Install it on Kali/Debian with: sudo apt install expect")
         for attempt in range(3):
             self.password = getpass.getpass(
                 f"Root SSH password for {self.user}@{self.host}: ")
