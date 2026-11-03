@@ -372,13 +372,85 @@ prepare_skip_unlock_passwordless() {
   return 1
 }
 
+prepare_skip_unlock_password_auth() {
+  local host key_home known_hosts probe candidate attempt
+  host="$("$PY" -c 'from urllib.parse import urlparse; import sys; print(urlparse(sys.argv[1]).hostname or sys.argv[1])' "$ROUTER")" || return 1
+  key_home="$HOME"
+  if [ -n "${SUDO_USER:-}" ]; then
+    key_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    [ -n "$key_home" ] || key_home="$HOME"
+  fi
+  known_hosts="$key_home/.ssh/known_hosts"
+  mkdir -p "$(dirname "$known_hosts")" || { bad "cannot create SSH known_hosts directory"; return 1; }
+
+  if [ -n "$KEY" ]; then
+    if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+        -o UserKnownHostsFile="$known_hosts" -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=8 "root@$host" true >/dev/null 2>&1; then
+      say "Existing root SSH key verified."
+      return 0
+    fi
+    bad "the supplied --key did not authenticate."
+    return 1
+  fi
+
+  probe="$(ssh -o BatchMode=yes -o UserKnownHostsFile="$known_hosts" \
+    -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
+    "root@$host" true 2>&1 || true)"
+  if [ -z "$probe" ]; then
+    export IDU_SSH_PASSWORD=""
+    export IDU_SSH_PASSWORD_SET=1
+    say "Root SSH already accepts an empty password."
+    return 0
+  fi
+  case "$probe" in
+    *"Permission denied"*|*"Authentication failed"*) ;;
+    *)
+      bad "root SSH is not reachable or host verification failed: $probe"
+      return 1
+      ;;
+  esac
+
+  command -v expect >/dev/null 2>&1 || {
+    bad "password-authenticated SSH requires expect: sudo apt install expect"
+    return 1
+  }
+  for attempt in 1 2; do
+    printf 'Root SSH password for root@%s: ' "$host"
+    IFS= read -r -s candidate </dev/tty || return 1
+    printf '\n'
+    if IDU_SSH_PASSWORD="$candidate" IDU_HOST="$host" IDU_KNOWN_HOSTS="$known_hosts" expect -c '
+      set timeout 20
+      spawn ssh -T -o "UserKnownHostsFile=$env(IDU_KNOWN_HOSTS)" -o PubkeyAuthentication=no -o PreferredAuthentications=password -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$env(IDU_HOST)" true
+      expect {
+        -re "(?i)password:" { send -- "$env(IDU_SSH_PASSWORD)\r"; exp_continue }
+        -re "(?i)\\(yes/no\\)" { send -- "yes\r"; exp_continue }
+        timeout { exit 124 }
+        eof
+      }
+      catch wait result
+      exit [lindex $result 3]
+    '; then
+      export IDU_SSH_PASSWORD="$candidate"
+      export IDU_SSH_PASSWORD_SET=1
+      unset candidate
+      say "Root SSH authentication verified; password kept in memory for this run only."
+      return 0
+    fi
+    unset candidate
+    bad "root SSH authentication failed."
+  done
+  return 1
+}
+
 prepare_root_ssh_auth() {
   if [ "$SKIP_UNLOCK" -eq 1 ]; then
-    prepare_skip_unlock_passwordless
+    prepare_skip_unlock_password_auth
   else
     prepare_root_ssh_key
   fi
 }
+
 
 ensure_root_ssh() {
   if [ "$SKIP_UNLOCK" -eq 1 ]; then
