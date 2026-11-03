@@ -1004,9 +1004,12 @@ def unlock(api: Api, key_path: str | None, password: str, port: int = 80,
             return
 
     if failures:
+        details = "\\n".join(f"    {line}" for failure in failures
+                              for line in failure.splitlines())
         raise IduError(
-            "all unlock attempts failed. The failure above is the specific "
-            "reason; callback/firewall troubleshooting only applies when the "
+            "all unlock attempts failed. Specific error:\\n"
+            f"{details}\\n"
+            "    Callback/firewall troubleshooting only applies when the "
             "payload was accepted and the router was expected to fetch it.")
     raise IduError("no unlock method completed.")
 
